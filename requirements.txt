@@ -1,0 +1,57 @@
+# Multi-Agent Literature Review System Requirements
+# 基于论文《AI-Augmented Literature Reviews》的依赖项
+#
+# Python 版本要求: >= 3.8
+# 推荐版本: 3.10 或更高
+
+# Core LLM Framework
+langchain>=0.1.0
+langchain-openai>=0.0.5
+langchain-core>=0.1.0
+langchain-text-splitters>=0.1.0
+openai>=1.0.0
+
+# API and Networking
+aiohttp>=3.9.0
+httpx>=0.25.0
+requests>=2.31.0
+
+# PDF Processing
+PyPDF2>=3.0.0
+pymupdf>=1.23.0
+
+# Text Processing
+tiktoken>=0.5.0
+
+# Data Processing
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Machine Learning
+scikit-learn>=1.3.0
+
+# Clustering
+hdbscan>=0.8.0
+
+# Configuration
+pyyaml>=6.0.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+aiofiles>=23.2.0
+click>=8.1.0
+tqdm>=4.66.0
+
+# Optional: Vector Database
+# faiss-cpu>=1.7.4
+# sentence-transformers>=2.2.0
+
+# Development dependencies
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+black>=23.0.0
+isort>=5.12.0
+mypy>=1.7.0
+

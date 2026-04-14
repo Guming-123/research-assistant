@@ -1,0 +1,141 @@
+# Multi-Agent Literature Review System Configuration
+# 系统配置文件
+
+system:
+  name: "Multi-Agent Literature Review System"
+  version: "1.0.0"
+  description: "基于IEEE Access 2025论文的智能文献综述系统"
+
+# 工作区配置
+workspace:
+  path: "./workspace"
+  auto_save: true
+  checkpoint_interval: 300  # seconds
+  max_checkpoints: 10
+
+# LLM配置
+llm:
+  default_model: "glm-4-plus"  # GLM 标准模型
+  default_temperature: 0.7
+  default_max_tokens: 4000
+  enable_streaming: false
+  timeout: 120
+  retry_attempts: 3
+
+# Embedding配置
+embedding:
+  model: "embedding-3"  # GLM Embedding 模型
+  dimensions: 1024  # embedding-3 输出维度
+  batch_size: 100
+
+# Agent配置
+agents:
+  coordinator:
+    model: "glm-4-plus"
+    temperature: 0.3
+
+  search:
+    model: "glm-4-flash"  # 使用快速模型减少成本
+    temperature: 0.3
+    default_databases: ["semantic_scholar", "arxiv"]
+    enable_pdf_download: false
+    max_concurrent_requests: 5
+
+  screen:
+    model: "glm-4-plus"
+    temperature: 0.3
+    chunk_size: 512
+    chunk_overlap: 50
+    default_nf_threshold: 0.7
+    enable_llm_screening: true
+
+  cluster:
+    model: "glm-4-flash"
+    temperature: 0.5
+    method: "hdbscan"
+    min_cluster_size: 5
+    min_samples: 3
+    dimensionality_reduction: "tsne"
+    n_components: 2
+    perplexity: 30
+
+  summary:
+    model: "glm-4-plus"  # 摘要生成使用质量更好的模型
+    temperature: 0.5
+    max_papers_per_cluster: 20
+    include_methodology: true
+    include_applications: true
+
+# 研究问题（RQ）配置
+rq:
+  enable_auto_generation: true
+  default_levels: 3
+  level1_questions:
+    - "方法论维度"
+    - "应用维度"
+    - "趋势维度"
+
+# 质量门控配置
+quality_gates:
+  post_search:
+    enabled: true
+    require_approval: false  # false=自动模式
+  post_screen:
+    enabled: true
+    require_approval: false
+  post_cluster:
+    enabled: true
+    require_approval: false
+  post_summary:
+    enabled: true
+    require_approval: false
+
+# 搜索配置
+search:
+  default_year_start: 2018
+  default_year_end: 2025
+  default_max_results: 500
+  rate_limit_per_second: 10
+
+# 筛选配置
+screening:
+  nf_threshold: 0.7
+  similarity_threshold: 0.5
+  top_k_chunks: 10
+  # 两阶段筛选模型配置
+  screening_model: "glm-4-flash"  # 边界案例初筛模型（快速、低成本）
+  refinement_model: "glm-4-plus"  # 精确判定模型（可选，未指定则使用screening_model）
+  llm_threshold_min: 0.5         # 低于此值直接拒绝
+  llm_threshold_max: 0.8         # 高于此值直接通过
+
+# 聚类配置
+clustering:
+  methods: ["hdbscan", "kmeans", "spectral"]
+  default_method: "hdbscan"
+  min_cluster_size: 5
+  max_clusters: 20
+
+# 报告配置
+report:
+  format: "markdown"
+  language: "zh-CN"
+  include_citations: true
+  include_figures: false
+  output_directory: "./workspace/reports"
+
+# 日志配置
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "./workspace/logs/system.log"
+  max_bytes: 10485760  # 10MB
+  backup_count: 5
+
+# API配置
+api:
+  semantic_scholar:
+    base_url: "https://api.semanticscholar.org/graph/v1"
+    rate_limit: 100  # requests per 5 minutes
+  arxiv:
+    base_url: "http://export.arxiv.org/api/query"
+    rate_limit: 10  # requests per second
