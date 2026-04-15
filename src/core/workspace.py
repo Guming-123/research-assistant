@@ -6,15 +6,17 @@ Shared Workspace for Multi-Agent Literature Review System
 import asyncio
 import json
 import os
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Union
 import hashlib
-import pickle
 
 from langchain_core.documents import Document
 import aiofiles
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -400,10 +402,16 @@ class SharedWorkspace:
             await f.write(json.dumps(self._summaries, ensure_ascii=False, indent=2))
 
     async def _save_embeddings(self) -> None:
-        """保存embedding数据（使用pickle）"""
-        path = self.base_path / "embeddings" / "embeddings.pkl"
-        async with aiofiles.open(path, "wb") as f:
-            pickle.dump(self._embeddings, f)
+        """保存embedding数据（使用JSON而非pickle）"""
+        path = self.base_path / "embeddings" / "embeddings.json"
+
+        # 转换为 JSON 可序列化的格式
+        embeddings_serializable = {
+            k: v for k, v in self._embeddings.items()
+        }
+
+        async with aiofiles.open(path, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(embeddings_serializable, ensure_ascii=False, indent=2))
 
     async def load_all(self) -> None:
         """加载所有持久化数据"""
@@ -430,6 +438,17 @@ class SharedWorkspace:
         if summ_path.exists():
             async with aiofiles.open(summ_path, encoding="utf-8") as f:
                 self._summaries = json.loads(await f.read())
+
+        # 加载 embeddings
+        emb_path = self.base_path / "embeddings" / "embeddings.json"
+        if emb_path.exists():
+            try:
+                async with aiofiles.open(emb_path, encoding="utf-8") as f:
+                    data = json.loads(await f.read())
+                    self._embeddings = {k: v for k, v in data.items()}
+            except Exception as e:
+                logger.warning(f"Failed to load embeddings: {e}")
+                self._embeddings = {}
 
     async def create_checkpoint(self, name: str) -> str:
         """

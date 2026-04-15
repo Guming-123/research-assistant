@@ -146,6 +146,8 @@ class SearchAgent(BaseAgent):
                 metrics=metrics,
             )
 
+        except KeyboardInterrupt:
+            raise  # 重新抛出，让 BaseAgent.run() 处理
         except Exception as e:
             error_msg = f"Search execution failed: {str(e)}"
             self.log_progress(error_msg, "error")

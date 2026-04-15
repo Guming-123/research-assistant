@@ -1,22 +1,105 @@
 """
 Embedding utilities
 向量嵌入和相似度计算
+
+支持：
+1. 本地开源模型（sentence-transformers, FlagEmbedding等）
+2. 远程API（GLM, OpenAI等）
 """
 
 import asyncio
 from typing import List, Dict, Optional, Tuple
 import logging
 import numpy as np
-
-from .llm import get_embedding_client
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
+
+# 全局变量缓存本地模型
+_local_models = {}
+_executor = ThreadPoolExecutor(max_workers=1)
+
+
+def _get_local_model(model_name: str):
+    """获取或加载本地模型"""
+    global _local_models
+
+    if model_name in _local_models:
+        return _local_models[model_name]
+
+    try:
+        # 检测是否可用GPU
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Using device: {device}")
+
+        if model_name.startswith("bge-"):
+            # 使用 FlagEmbedding (BGE系列)
+            from FlagEmbedding import FlagModel
+            model = FlagModel(
+                f'BAAI/{model_name}',
+                query_instruction_for_retrieval="为这个句子生成表示以用于检索相关文章：",
+                device=device  # 使用GPU
+            )
+            _local_models[model_name] = model
+            logger.info(f"Loaded BGE model: {model_name} on {device}")
+            return model
+
+        elif model_name.startswith("m3e-"):
+            # 使用 M3E 模型
+            from sentence_transformers import SentenceTransformer
+            model = SentenceTransformer(f'moka-ai/{model_name}', device=device)
+            _local_models[model_name] = model
+            logger.info(f"Loaded M3E model: {model_name} on {device}")
+            return model
+
+        else:
+            # 默认使用 sentence-transformers
+            from sentence_transformers import SentenceTransformer
+
+            # 模型名称映射
+            model_map = {
+                "local": "paraphrase-multilingual-MiniLM-L12-v2",  # 多语言
+                "local-zh": "BAAI/bge-small-zh-v1.5",  # 中文优化
+                "local-en": "all-MiniLM-L6-v2",  # 英文优化
+            }
+
+            actual_model = model_map.get(model_name, model_name)
+            model = SentenceTransformer(actual_model, device=device)
+            _local_models[model_name] = model
+            logger.info(f"Loaded SentenceTransformer model: {actual_model} on {device}")
+            return model
+
+    except ImportError as e:
+        logger.error(f"Failed to import local model library: {e}")
+        raise ImportError(
+            f"请安装本地模型依赖: pip install sentence-transformers FlagEmbedding"
+        )
+    except Exception as e:
+        logger.error(f"Failed to load local model {model_name}: {e}")
+        raise
+
+
+def _run_local_model(model, texts: List[str]) -> List[List[float]]:
+    """在线程池中运行本地模型（避免阻塞）"""
+    # 判断模型类型
+    if hasattr(model, 'encode'):
+        # SentenceTransformer 或 M3E
+        embeddings = model.encode(texts, normalize_embeddings=True)
+        return embeddings.tolist()
+    elif hasattr(model, 'encode_queries'):
+        # BGE/FlagEmbedding
+        embeddings = model.encode_queries(texts)
+        return embeddings.tolist()
+    else:
+        raise ValueError(f"Unknown model type: {type(model)}")
 
 
 async def get_embeddings(
     texts: List[str],
-    model: str = "text-embedding-3-small",
-    batch_size: int = 100,
+    model: str = "local-zh",
+    batch_size: int = 32,
 ) -> List[List[float]]:
     """
     获取文本的embeddings
@@ -24,32 +107,81 @@ async def get_embeddings(
     Args:
         texts: 文本列表
         model: 模型名称
+              - 本地模型: "local", "local-zh", "local-en", "bge-small-zh-v1.5", "m3e-base" 等
+              - 远程API: "embedding-3" (GLM), "text-embedding-3-small" (OpenAI)
         batch_size: 批处理大小
 
     Returns:
         embedding向量列表
     """
-    embedding_client = get_embedding_client(model)
+    # 判断是否使用本地模型
+    is_local = not model.startswith("embedding") and not model.startswith("text-embedding")
 
-    all_embeddings = []
-
-    # 分批处理
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i:i + batch_size]
+    if is_local:
+        # 使用本地模型
         try:
-            embeddings = await embedding_client.aembed_documents(batch)
-            all_embeddings.extend(embeddings)
-            logger.debug(f"Generated embeddings for batch {i//batch_size + 1}")
+            local_model = _get_local_model(model)
+            all_embeddings = []
+
+            # 分批处理
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i:i + batch_size]
+
+                # 在线程池中运行（避免阻塞事件循环）
+                loop = asyncio.get_event_loop()
+                embeddings = await loop.run_in_executor(
+                    _executor,
+                    _run_local_model,
+                    local_model,
+                    batch
+                )
+
+                all_embeddings.extend(embeddings)
+                logger.info(f"Generated embeddings for batch {i//batch_size + 1} ({len(batch)} texts)")
+
+            logger.info(f"get_embeddings completed: {len(all_embeddings)} embeddings total")
+            logger.info(f"Returning embeddings (first 3 dims: {len(all_embeddings[0]) if all_embeddings else 0} dimensions)...")
+            return all_embeddings
+
         except Exception as e:
-            logger.error(f"Failed to generate embeddings for batch: {e}")
-            # 返回零向量作为fallback
-            zero_embedding = [0.0] * 1536  # text-embedding-3-small的维度
-            all_embeddings.extend([zero_embedding] * len(batch))
+            logger.error(f"Failed to generate embeddings with local model: {e}")
+            # 返回零向量
+            zero_embedding = [0.0] * 768  # 大多数本地模型是768维
+            return [zero_embedding] * len(texts)
 
-    return all_embeddings
+    else:
+        # 使用远程API (GLM/OpenAI等)
+        from .llm import get_embedding_client
+
+        # API 的 embedding 模型限制
+        if model.startswith("embedding"):
+            batch_size = min(batch_size, 64)  # GLM API 限制
+
+        embedding_client = get_embedding_client(model)
+
+        all_embeddings = []
+
+        # 分批处理
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            try:
+                embeddings = await embedding_client.aembed_documents(batch)
+                all_embeddings.extend(embeddings)
+                logger.info(f"Generated embeddings for batch {i//batch_size + 1} ({len(batch)} texts)")
+            except Exception as e:
+                logger.error(f"Failed to generate embeddings for batch: {e}")
+                # 返回零向量作为fallback
+                if model == "embedding-3":
+                    zero_embedding = [0.0] * 1024
+                else:
+                    zero_embedding = [0.0] * 1536
+                all_embeddings.extend([zero_embedding] * len(batch))
+
+        logger.info(f"get_embeddings completed: {len(all_embeddings)} embeddings total")
+        return all_embeddings
 
 
-async def get_embedding(text: str, model: str = "text-embedding-3-small") -> List[float]:
+async def get_embedding(text: str, model: str = "local-zh") -> List[float]:
     """
     获取单个文本的embedding
 
@@ -60,12 +192,8 @@ async def get_embedding(text: str, model: str = "text-embedding-3-small") -> Lis
     Returns:
         embedding向量
     """
-    embedding_client = get_embedding_client(model)
-    try:
-        return await embedding_client.aembed_query(text)
-    except Exception as e:
-        logger.error(f"Failed to generate embedding: {e}")
-        return [0.0] * 1536
+    embeddings = await get_embeddings([text], model=model)
+    return embeddings[0]
 
 
 def compute_similarity(

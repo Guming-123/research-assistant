@@ -117,16 +117,35 @@ class ClusterAgent(BaseAgent):
             # ① 获取embeddings
             self.log_progress("Loading embeddings...")
             embeddings_dict = await self.workspace.get_all_embeddings()
+            self.log_progress(f"Loaded {len(embeddings_dict)} embeddings from workspace")
+
             if not embeddings_dict:
                 # 如果没有embeddings，生成它们
                 self.log_progress("Generating embeddings...")
-                texts = [f"{p.title}\n{p.abstract or ''}" for p in papers]
+
+                # 临时限制：最多处理 500 篇论文（测试用）
+                papers_limited = papers[:500] if len(papers) > 500 else papers
+                self.log_progress(f"Limited to {len(papers_limited)} papers for testing")
+
+                texts = [f"{p.title}\n{p.abstract or ''}" for p in papers_limited]
+                self.log_progress(f"Prepared {len(texts)} texts for embedding")
+
+                self.log_progress("Calling get_embeddings...")
+                import time
+                start_time = time.time()
                 embeddings = await get_embeddings(texts)
-                embeddings_dict = {p.id: emb for p, emb in zip(papers, embeddings)}
+                elapsed = time.time() - start_time
+                self.log_progress(f"get_embeddings returned in {elapsed:.2f}s: {len(embeddings)} embeddings")
+
+                self.log_progress("Creating embeddings dictionary...")
+                embeddings_dict = {p.id: emb for p, emb in zip(papers_limited, embeddings)}
+                self.log_progress(f"Dictionary created with {len(embeddings_dict)} entries")
 
             # 过滤有embedding的论文
+            self.log_progress("Filtering papers with embeddings...")
             valid_papers = [p for p in papers if p.id in embeddings_dict]
             valid_embeddings = [embeddings_dict[p.id] for p in valid_papers]
+            self.log_progress(f"Filtered to {len(valid_papers)} valid papers")
 
             if len(valid_papers) < min_cluster_size:
                 return self._create_result(
@@ -189,6 +208,8 @@ class ClusterAgent(BaseAgent):
                 metrics=metrics,
             )
 
+        except KeyboardInterrupt:
+            raise  # 重新抛出，让 BaseAgent.run() 处理
         except Exception as e:
             error_msg = f"Clustering execution failed: {str(e)}"
             self.log_progress(error_msg, "error")
@@ -212,23 +233,35 @@ class ClusterAgent(BaseAgent):
             from sklearn.decomposition import PCA
 
             arr = np.array(embeddings)
+            n_samples = len(arr)
+
+            self.log_progress(f"Starting dimensionality reduction for {n_samples} papers...")
 
             # 如果维度太高，先用PCA降到50维
             if arr.shape[1] > 50:
+                self.log_progress(f"Reducing from {arr.shape[1]} to 50 dimensions using PCA...")
                 pca = PCA(n_components=50, random_state=42)
                 arr = pca.fit_transform(arr)
-                self.log_progress(f"PCA reduced to {arr.shape[1]} dimensions")
+                self.log_progress(f"PCA reduction complete")
 
-            # t-SNE降到2维
-            tsne = TSNE(
-                n_components=2,
-                perplexity=min(30, len(arr) - 1),
-                random_state=42,
-                n_iter=1000,
-            )
-            reduced = tsne.fit_transform(arr)
+            # 根据数据量选择降维方法
+            if n_samples > 1000:
+                # 大数据量：直接用PCA降到2维（快速）
+                self.log_progress(f"Large dataset ({n_samples} samples), using PCA for final reduction...")
+                pca_final = PCA(n_components=2, random_state=42)
+                reduced = pca_final.fit_transform(arr)
+            else:
+                # 小数据量：用t-SNE
+                self.log_progress(f"Using t-SNE for final reduction ({n_samples} samples)...")
+                tsne = TSNE(
+                    n_components=2,
+                    perplexity=min(30, max(5, n_samples // 10)),
+                    random_state=42,
+                    max_iter=500,  # 减少迭代次数加快速度
+                )
+                reduced = tsne.fit_transform(arr)
 
-            self.log_progress(f"t-SNE reduced to {reduced.shape[1]} dimensions")
+            self.log_progress(f"Dimensionality reduction complete: {reduced.shape[1]} dimensions")
             return reduced
 
         except ImportError:

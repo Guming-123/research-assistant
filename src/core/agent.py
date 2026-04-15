@@ -265,6 +265,9 @@ class BaseAgent(ABC):
 
             return result
 
+        except KeyboardInterrupt:
+            # 重新抛出 KeyboardInterrupt，让上层处理
+            raise
         except (LLMError, ValidationError) as e:
             # 已知的业务异常，直接记录
             error_msg = f"{type(e).__name__}: {str(e)}"

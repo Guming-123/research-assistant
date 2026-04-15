@@ -94,9 +94,9 @@ class SystemConfig:
     llm_retry_attempts: int = 3
 
     # Embedding配置
-    embedding_model: str = "embedding-3"
-    embedding_dimensions: int = 1024
-    embedding_batch_size: int = 100
+    embedding_model: str = "local-zh"  # 默认使用本地中文模型
+    embedding_dimensions: int = 768  # 本地模型通常是768维
+    embedding_batch_size: int = 32  # 本地模型批次大小
 
     # API配置
     s2_base_url: str = "https://api.semanticscholar.org/graph/v1"
@@ -173,6 +173,7 @@ class ConfigLoader:
             "OPENAI_API_KEY": "llm.api_key",
             "OPENAI_BASE_URL": "llm.base_url",
             "OPENAI_MODEL": "llm.model",
+            "EMBEDDING_MODEL": "embedding.model",
             "WORKSPACE_PATH": "workspace.path",
             "LOG_LEVEL": "logging.level",
             "LOG_FILE": "logging.file",
@@ -232,9 +233,9 @@ class ConfigLoader:
             llm_retry_attempts=llm.get("retry_attempts", 3),
 
             # Embedding
-            embedding_model=embedding.get("model", "embedding-3"),
-            embedding_dimensions=embedding.get("dimensions", 1024),
-            embedding_batch_size=embedding.get("batch_size", 100),
+            embedding_model=embedding.get("model", "local-zh"),
+            embedding_dimensions=embedding.get("dimensions", 768),
+            embedding_batch_size=embedding.get("batch_size", 32),
 
             # API
             s2_base_url=api.get("semantic_scholar", {}).get("base_url", "https://api.semanticscholar.org/graph/v1"),

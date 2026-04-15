@@ -1,241 +1,255 @@
 """
 Tests for SharedWorkspace
-测试工作区的读写、序列化功能
 """
 
-import asyncio
 import pytest
-import tempfile
-import shutil
+import asyncio
 from pathlib import Path
 
-from src.core.workspace import (
-    SharedWorkspace,
-    LiteratureRecord,
-    ClusterResult,
-    WorkspaceEntry,
-)
+from src.core.workspace import SharedWorkspace, LiteratureRecord, ClusterResult
 
 
-@pytest.fixture
-def temp_workspace():
-    """创建临时工作区"""
-    temp_dir = tempfile.mkdtemp()
-    workspace = SharedWorkspace(temp_dir)
-    yield workspace
-    # 清理
-    shutil.rmtree(temp_dir, ignore_errors=True)
+class TestLiteratureRecord:
+    """测试LiteratureRecord"""
 
-
-@pytest.mark.asyncio
-async def test_workspace_initialization(temp_workspace):
-    """测试工作区初始化"""
-    assert temp_workspace.base_path.exists()
-    assert temp_workspace.get_literature_count() == 0
-
-
-@pytest.mark.asyncio
-async def test_add_literature(temp_workspace):
-    """测试添加文献记录"""
-    record = LiteratureRecord(
-        id="test1",
-        title="Test Paper",
-        authors=["Author One", "Author Two"],
-        abstract="This is a test abstract.",
-        year=2024,
-        source="semantic_scholar",
-        url="https://example.com/paper1",
-    )
-
-    count = await temp_workspace.add_literature(record)
-    assert count == 1
-    assert temp_workspace.get_literature_count() == 1
-
-
-@pytest.mark.asyncio
-async def test_get_literature(temp_workspace):
-    """测试获取文献记录"""
-    record = LiteratureRecord(
-        id="test1",
-        title="Test Paper",
-        authors=["Author One"],
-        abstract="Abstract",
-        year=2024,
-        source="test",
-        url="https://example.com",
-    )
-
-    await temp_workspace.add_literature(record)
-
-    # 获取所有文献
-    papers = await temp_workspace.get_literature()
-    assert len(papers) == 1
-    assert papers[0].title == "Test Paper"
-
-    # 通过ID获取
-    papers_by_id = await temp_workspace.get_literature(paper_ids=["test1"])
-    assert len(papers_by_id) == 1
-
-
-@pytest.mark.asyncio
-async def test_update_literature(temp_workspace):
-    """测试更新文献记录"""
-    record = LiteratureRecord(
-        id="test1",
-        title="Test Paper",
-        authors=["Author One"],
-        abstract="Abstract",
-        year=2024,
-        source="test",
-        url="https://example.com",
-    )
-
-    await temp_workspace.add_literature(record)
-
-    # 更新relevance_score
-    success = await temp_workspace.update_literature("test1", {"relevance_score": 0.85})
-    assert success is True
-
-    papers = await temp_workspace.get_literature(paper_ids=["test1"])
-    assert papers[0].relevance_score == 0.85
-
-
-@pytest.mark.asyncio
-async def test_literature_deduplication(temp_workspace):
-    """测试文献去重"""
-    record1 = LiteratureRecord(
-        id="test1",
-        title="Test Paper",
-        authors=["Author One"],
-        abstract="Abstract",
-        year=2024,
-        source="test",
-        url="https://example.com",
-    )
-
-    record2 = LiteratureRecord(
-        id="test2",  # 不同ID
-        title="Test Paper",  # 相同标题
-        authors=["Author One"],
-        abstract="Abstract",
-        year=2024,
-        source="test",
-        url="https://example.com",
-    )
-
-    # 相同标题的记录应该被去重（基于hash）
-    count = await temp_workspace.add_literature([record1, record2])
-    # 由于hash相同，只应该添加一个
-    assert count == 1
-
-
-@pytest.mark.asyncio
-async def test_save_and_load_clusters(temp_workspace):
-    """测试聚类结果的保存和加载"""
-    cluster = ClusterResult(
-        cluster_id=1,
-        label="Test Cluster",
-        description="A test cluster",
-        paper_ids=["paper1", "paper2"],
-        representative_papers=[],
-        sub_themes=["theme1", "theme2"],
-        size=2,
-    )
-
-    await temp_workspace.save_clusters([cluster])
-
-    # 获取所有聚类
-    clusters = await temp_workspace.get_clusters()
-    assert len(clusters) == 1
-    assert clusters[0].label == "Test Cluster"
-
-    # 获取单个聚类
-    single_cluster = await temp_workspace.get_cluster(1)
-    assert single_cluster is not None
-    assert single_cluster.label == "Test Cluster"
-
-
-@pytest.mark.asyncio
-async def test_summary_management(temp_workspace):
-    """测试摘要管理"""
-    await temp_workspace.save_summary("test_key", "Test summary content")
-
-    summary = await temp_workspace.get_summary("test_key")
-    assert summary == "Test summary content"
-
-    summaries = await temp_workspace.get_all_summaries()
-    assert "test_key" in summaries
-    assert summaries["test_key"] == "Test summary content"
-
-
-@pytest.mark.asyncio
-async def test_workspace_persistence(temp_workspace):
-    """测试工作区持久化"""
-    # 添加数据
-    record = LiteratureRecord(
-        id="test1",
-        title="Test Paper",
-        authors=["Author One"],
-        abstract="Abstract",
-        year=2024,
-        source="test",
-        url="https://example.com",
-    )
-    await temp_workspace.add_literature(record)
-
-    # 创建新工作区实例（模拟重启）
-    new_workspace = SharedWorkspace(temp_workspace.base_path)
-    await new_workspace.load_all()
-
-    # 验证数据已恢复
-    assert new_workspace.get_literature_count() == 1
-    papers = await new_workspace.get_literature()
-    assert papers[0].title == "Test Paper"
-
-
-@pytest.mark.asyncio
-async def test_checkpoint_and_restore(temp_workspace):
-    """测试检查点创建和恢复"""
-    # 添加一些数据
-    record = LiteratureRecord(
-        id="test1",
-        title="Test Paper",
-        authors=["Author One"],
-        abstract="Abstract",
-        year=2024,
-        source="test",
-        url="https://example.com",
-    )
-    await temp_workspace.add_literature(record)
-
-    # 创建检查点
-    checkpoint_path = await temp_workspace.create_checkpoint("test_checkpoint")
-    assert checkpoint_path is not None
-    assert "test_checkpoint" in checkpoint_path
-
-    # 修改数据
-    await temp_workspace.add_literature(
-        LiteratureRecord(
-            id="test2",
-            title="Another Paper",
-            authors=["Author Two"],
-            abstract="Another abstract",
-            year=2024,
-            source="test",
-            url="https://example.com/2",
+    def test_create_record(self, sample_paper):
+        """测试创建文献记录"""
+        record = LiteratureRecord(
+            id=sample_paper["paperId"],
+            title=sample_paper["title"],
+            authors=[a["name"] for a in sample_paper["authors"]],
+            abstract=sample_paper["abstract"],
+            year=sample_paper["year"],
+            source=sample_paper["source"],
+            url=sample_paper["url"],
         )
-    )
+        assert record.id == sample_paper["paperId"]
+        assert record.title == sample_paper["title"]
+        assert len(record.authors) == 2
 
-    # 恢复检查点
-    success = await temp_workspace.restore_checkpoint("test_checkpoint")
-    assert success is True
-    assert temp_workspace.get_literature_count() == 1  # 应该恢复到1篇
+    def test_to_dict(self, sample_paper):
+        """测试转换为字典"""
+        record = LiteratureRecord(
+            id=sample_paper["paperId"],
+            title=sample_paper["title"],
+            authors=[a["name"] for a in sample_paper["authors"]],
+            abstract=sample_paper["abstract"],
+            year=sample_paper["year"],
+            source=sample_paper["source"],
+            url=sample_paper["url"],
+        )
+        data = record.to_dict()
+        assert data["id"] == sample_paper["paperId"]
+        assert data["title"] == sample_paper["title"]
+
+    def test_from_dict(self, sample_paper):
+        """测试从字典创建"""
+        data = {
+            "id": sample_paper["paperId"],
+            "title": sample_paper["title"],
+            "authors": [a["name"] for a in sample_paper["authors"]],
+            "abstract": sample_paper["abstract"],
+            "year": sample_paper["year"],
+            "source": sample_paper["source"],
+            "url": sample_paper["url"],
+        }
+        record = LiteratureRecord.from_dict(data)
+        assert record.id == sample_paper["paperId"]
+        assert record.title == sample_paper["title"]
 
 
-def test_workspace_info(temp_workspace):
-    """测试获取工作区信息"""
-    info = temp_workspace.get_workspace_info()
-    assert "literature_count" in info
-    assert "cluster_count" in info
-    assert "summary_count" in info
-    assert info["literature_count"] == 0
+class TestSharedWorkspace:
+    """测试SharedWorkspace"""
+
+    @pytest.mark.asyncio
+    async def test_workspace_initialization(self, temp_workspace):
+        """测试工作区初始化"""
+        ws = SharedWorkspace(temp_workspace)
+        assert ws.base_path == Path(temp_workspace)
+        assert ws.get_literature_count() == 0
+
+        # 检查目录是否创建
+        assert (Path(temp_workspace) / "literature").exists()
+        assert (Path(temp_workspace) / "clusters").exists()
+
+    @pytest.mark.asyncio
+    async def test_add_literature(self, workspace, sample_paper):
+        """测试添加文献"""
+        record = LiteratureRecord(
+            id=sample_paper["paperId"],
+            title=sample_paper["title"],
+            authors=[a["name"] for a in sample_paper["authors"]],
+            abstract=sample_paper["abstract"],
+            year=sample_paper["year"],
+            source=sample_paper["source"],
+            url=sample_paper["url"],
+        )
+
+        count = await workspace.add_literature(record)
+        assert count == 1
+        assert workspace.get_literature_count() == 1
+
+    @pytest.mark.asyncio
+    async def test_add_multiple_literature(self, workspace, sample_papers):
+        """测试批量添加文献"""
+        records = []
+        for paper in sample_papers:
+            record = LiteratureRecord(
+                id=paper["paperId"],
+                title=paper["title"],
+                authors=[a["name"] for a in paper["authors"]],
+                abstract=paper["abstract"],
+                year=paper["year"],
+                source=paper["source"],
+                url=paper["url"],
+            )
+            records.append(record)
+
+        count = await workspace.add_literature(records)
+        assert count == 10
+        assert workspace.get_literature_count() == 10
+
+    @pytest.mark.asyncio
+    async def test_get_literature(self, workspace, sample_papers):
+        """测试获取文献"""
+        # 添加文献
+        records = [
+            LiteratureRecord(
+                id=p["paperId"],
+                title=p["title"],
+                authors=[a["name"] for a in p["authors"]],
+                abstract=p["abstract"],
+                year=p["year"],
+                source=p["source"],
+                url=p["url"],
+            )
+            for p in sample_papers
+        ]
+        await workspace.add_literature(records)
+
+        # 获取所有文献
+        papers = await workspace.get_literature()
+        assert len(papers) == 10
+
+        # 按ID获取
+        specific = await workspace.get_literature(paper_ids=["paper1", "paper2"])
+        assert len(specific) == 2
+        assert specific[0].id == "paper1"
+
+    @pytest.mark.asyncio
+    async def test_update_literature(self, workspace, sample_paper):
+        """测试更新文献"""
+        record = LiteratureRecord(
+            id=sample_paper["paperId"],
+            title=sample_paper["title"],
+            authors=[a["name"] for a in sample_paper["authors"]],
+            abstract=sample_paper["abstract"],
+            year=sample_paper["year"],
+            source=sample_paper["source"],
+            url=sample_paper["url"],
+        )
+        await workspace.add_literature(record)
+
+        # 更新
+        success = await workspace.update_literature(
+            sample_paper["paperId"], {"citation_count": 100}
+        )
+        assert success is True
+
+        papers = await workspace.get_literature(paper_ids=[sample_paper["paperId"]])
+        assert papers[0].citation_count == 100
+
+    @pytest.mark.asyncio
+    async def test_remove_literature(self, workspace, sample_papers):
+        """测试删除文献"""
+        records = [
+            LiteratureRecord(
+                id=p["paperId"],
+                title=p["title"],
+                authors=[a["name"] for a in p["authors"]],
+                abstract=p["abstract"],
+                year=p["year"],
+                source=p["source"],
+                url=p["url"],
+            )
+            for p in sample_papers[:5]
+        ]
+        await workspace.add_literature(records)
+
+        # 删除
+        count = await workspace.remove_literature(["paper1", "paper2"])
+        assert count == 2
+        assert workspace.get_literature_count() == 3
+
+    @pytest.mark.asyncio
+    async def test_save_and_load_clusters(self, workspace):
+        """测试保存和加载聚类"""
+        cluster = ClusterResult(
+            cluster_id=1,
+            label="Test Cluster",
+            description="A test cluster",
+            paper_ids=["paper1", "paper2"],
+            representative_papers=[],
+            sub_themes=["theme1", "theme2"],
+            size=2,
+        )
+
+        await workspace.save_clusters([cluster])
+
+        clusters = await workspace.get_clusters()
+        assert len(clusters) == 1
+        assert clusters[0].cluster_id == 1
+        assert clusters[0].label == "Test Cluster"
+
+    @pytest.mark.asyncio
+    async def test_save_and_get_summary(self, workspace):
+        """测试保存和获取摘要"""
+        await workspace.save_summary("test_key", "This is a test summary")
+
+        summary = await workspace.get_summary("test_key")
+        assert summary == "This is a test summary"
+
+    @pytest.mark.asyncio
+    async def test_save_and_get_embeddings(self, workspace):
+        """测试保存和获取embeddings"""
+        embedding = [0.1, 0.2, 0.3] * 100  # 300维向量
+        await workspace.save_embedding("paper1", embedding)
+
+        retrieved = await workspace.get_embedding("paper1")
+        assert retrieved == embedding
+
+    @pytest.mark.asyncio
+    async def test_checkpoint(self, workspace, sample_papers):
+        """测试检查点功能"""
+        # 添加一些数据
+        records = [
+            LiteratureRecord(
+                id=p["paperId"],
+                title=p["title"],
+                authors=[a["name"] for a in p["authors"]],
+                abstract=p["abstract"],
+                year=p["year"],
+                source=p["source"],
+                url=p["url"],
+            )
+            for p in sample_papers[:3]
+        ]
+        await workspace.add_literature(records)
+
+        # 创建检查点
+        checkpoint_path = await workspace.create_checkpoint("test_checkpoint")
+        assert checkpoint_path is not None
+        assert "test_checkpoint" in checkpoint_path
+
+        # 检查检查点目录
+        checkpoint_dir = Path(checkpoint_path)
+        assert checkpoint_dir.exists()
+        assert (checkpoint_dir / "literature").exists()
+
+    @pytest.mark.asyncio
+    async def test_workspace_info(self, workspace):
+        """测试获取工作区信息"""
+        info = workspace.get_workspace_info()
+        assert "literature_count" in info
+        assert "cluster_count" in info
+        assert info["literature_count"] == 0

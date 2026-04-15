@@ -1,48 +1,44 @@
 #!/bin/bash
-# Test runner for Multi-Agent Literature Review System
+# 测试运行脚本
 
-set -e
-
-echo "====================================="
-echo "Multi-Agent Literature Review System"
-echo "Test Runner v1.2"
-echo "====================================="
+echo "================================"
+echo "Multi-Agent Literature Review - Tests"
+echo "================================"
 echo ""
 
-# Check if pytest is installed
-if ! command -v pytest &> /dev/null; then
-    echo "pytest not found. Installing test dependencies..."
-    pip install -q pytest pytest-asyncio pytest-cov
-fi
+# 检查依赖
+echo "检查测试依赖..."
+python -c "import pytest" 2>/dev/null || {
+    echo "❌ pytest 未安装"
+    echo "请运行: pip install pytest pytest-asyncio"
+    exit 1
+}
 
-# Run tests with coverage
-echo "Running tests with coverage report..."
-echo ""
+python -c "import pytest_asyncio" 2>/dev/null || {
+    echo "❌ pytest-asyncio 未安装"
+    echo "请运行: pip install pytest-asyncio"
+    exit 1
+}
 
-pytest tests/ -v \
-    --cov=src \
-    --cov-report=term-missing \
-    --cov-report=html:htmlcov \
-    --tb=short \
-    -W ignore
-
-echo ""
-echo "====================================="
-echo "Test Results Summary"
-echo "====================================="
-echo ""
-echo "Coverage report generated in: htmlcov/index.html"
-echo ""
-echo "To view detailed coverage:"
-echo "  1. Open htmlcov/index.html in a browser"
-echo "  2. Or run: pytest tests/ --cov=src --cov-report=html"
+echo "✅ 依赖检查完成"
 echo ""
 
-# Exit with appropriate code
+# 运行测试
+echo "运行测试..."
+echo ""
+
+pytest -v --tb=short "$@"
+
+# 检查结果
 if [ $? -eq 0 ]; then
-    echo "✅ All tests passed!"
-    exit 0
+    echo ""
+    echo "================================"
+    echo "✅ 所有测试通过！"
+    echo "================================"
 else
-    echo "❌ Some tests failed. Please check the output above."
+    echo ""
+    echo "================================"
+    echo "❌ 有测试失败"
+    echo "================================"
     exit 1
 fi

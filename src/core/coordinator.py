@@ -183,6 +183,9 @@ class Coordinator(BaseAgent):
             # 完成工作流
             return await self._finalize_workflow()
 
+        except KeyboardInterrupt:
+            # 重新抛出 KeyboardInterrupt，让上层处理
+            raise
         except Exception as e:
             error_msg = f"Workflow execution failed: {str(e)}"
             self.log_progress(error_msg, "error")

@@ -255,6 +255,8 @@ class ScreenAgent(BaseAgent):
                 metrics=metrics,
             )
 
+        except KeyboardInterrupt:
+            raise  # 重新抛出，让 BaseAgent.run() 处理
         except (LLMError, ValidationError) as e:
             error_msg = f"Screening failed: {type(e).__name__}: {str(e)}"
             self.log_progress(error_msg, "error")

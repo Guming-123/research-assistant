@@ -68,7 +68,7 @@ def get_llm_client(
 
 
 def get_embedding_client(
-    model: str = "text-embedding-3-small",
+    model: str = "embedding-3",
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
 ) -> OpenAIEmbeddings:
@@ -76,7 +76,7 @@ def get_embedding_client(
     获取Embedding客户端（带缓存）
 
     Args:
-        model: 模型名称
+        model: 模型名称（GLM: embedding-3, OpenAI: text-embedding-3-small）
         api_key: API密钥
         base_url: API基础URL
 

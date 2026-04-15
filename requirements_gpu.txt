@@ -1,0 +1,28 @@
+# GPU 加速依赖包
+# 根据您的 CUDA 版本选择合适的 PyTorch 版本
+
+# 检查 CUDA 版本: nvidia-smi
+# 然后访问 https://pytorch.org/get-started/locally/ 获取合适的安装命令
+
+# PyTorch (CUDA 11.8)
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# PyTorch (CUDA 12.1)
+# pip install torch torchvision torchaudio
+
+# 或使用 conda:
+# conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+
+# Sentence Transformers (会自动安装 PyTorch)
+sentence-transformers>=2.2.0
+
+# FlagEmbedding (BGE 模型)
+FlagEmbedding>=1.2.0
+
+# GPU 加速的其他库
+faiss-gpu>=1.7.0  # 向量搜索GPU加速
+scikit-learn>=1.3.0  # 包含 GPU 支持的算法
+numpy>=1.24.0
+
+# 可选：更好的GPU性能
+# cupy-cuda12x  # GPU 加速的 NumPy 替代品

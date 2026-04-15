@@ -1,122 +1,134 @@
-# 测试指南 - Multi-Agent Literature Review System
+# 测试文档
 
-## 快速开始
+本项目使用 pytest 进行单元测试和集成测试。
 
-### 运行所有测试
+## 安装测试依赖
 
 ```bash
-# 使用测试脚本（推荐）
-bash run_tests.sh
+pip install pytest pytest-asyncio pytest-cov
+```
 
-# 或直接使用pytest
-pytest tests/ -v
+## 运行测试
+
+### 运行所有测试
+```bash
+pytest
 ```
 
 ### 运行特定测试文件
-
 ```bash
-# 测试工作区
-pytest tests/test_workspace.py -v
-
-# 测试筛选Agent
-pytest tests/test_screen_agent.py -v
-
-# 测试RQ管理器
-pytest tests/test_rq_manager.py -v
-
-# 测试配置系统
-pytest tests/test_config.py -v
+pytest tests/test_workspace.py
+pytest tests/test_agents.py
+pytest tests/test_rq_manager.py
+pytest tests/test_integration.py
 ```
 
-### 生成覆盖率报告
-
+### 运行特定测试类或方法
 ```bash
-# 生成HTML覆盖率报告
-pytest tests/ --cov=src --cov-report=html
-
-# 查看报告
-open htmlcov/index.html  # macOS
-xdg-open htmlcov/index.html  # Linux
-start htmlcov/index.html  # Windows
+pytest tests/test_workspace.py::TestSharedWorkspace::test_add_literature
 ```
 
-## 测试说明
+### 查看详细输出
+```bash
+pytest -v
+```
 
-### 核心测试覆盖
+### 显示打印输出
+```bash
+pytest -s
+```
 
-| 测试文件 | 覆盖模块 | 测试用例数 |
-|---------|---------|-----------|
-| test_workspace.py | SharedWorkspace | 10+ |
-| test_screen_agent.py | ScreenAgent | 10+ |
-| test_rq_manager.py | RQManager | 12+ |
-| test_config.py | Config系统 | 10+ |
+### 运行测试并生成覆盖率报告
+```bash
+pytest --cov=src --cov-report=html
+```
 
-### 关键测试场景
+## 测试结构
 
-#### 1. chunk_id 处理
-- ✅ 安全分隔符解析
-- ✅ 带下划线的paper_id处理
-- ✅ 边界情况处理
+```
+tests/
+├── conftest.py              # pytest配置和fixtures
+├── test_workspace.py        # SharedWorkspace测试
+├── test_rq_manager.py       # RQManager测试
+├── test_agents.py           # 各Agent测试
+└── test_integration.py      # 集成测试
+```
 
-#### 2. NF计算
-- ✅ 使用实际chunk数计算
-- ✅ 零chunk避免除零
-- ✅ 边界值验证
+## 测试覆盖范围
 
-#### 3. 两阶段筛选
-- ✅ 高置信度直接通过 (NF >= 0.8)
-- ✅ 低置信度直接拒绝 (NF < 0.5)
-- ✅ 边界案例LLM判定 (0.5 <= NF < 0.8)
+### test_workspace.py
+- LiteratureRecord 创建和转换
+- 文献添加、获取、更新、删除
+- 聚类保存和加载
+- 摘要保存和获取
+- Embedding保存和获取
+- 检查点创建和恢复
 
-#### 4. 配置管理
-- ✅ YAML配置加载
-- ✅ 环境变量覆盖
-- ✅ 默认值回退
+### test_rq_manager.py
+- ResearchQuestion 创建和转换
+- RQ树初始化
+- 各级别问题获取
+- 问题添加
+- 保存和加载
+- 导出报告
 
-#### 5. 并发安全
-- ✅ 双重检查锁模式
-- ✅ 防止重复初始化
+### test_agents.py
+- SearchAgent 测试
+- ScreenAgent 测试
+- ClusterAgent 测试
+- SummaryAgent 测试
+- 输入验证
+- 查询构建
+- 文档分块
+- 降维
 
-## 持续集成
+### test_integration.py
+- 完整搜索工作流
+- 聚类工作流
+- RQ树工作流
+- 工作区持久化
+- 检查点工作流
 
-### GitHub Actions 配置示例
+## Fixtures
+
+测试使用以下fixtures（在 `conftest.py` 中定义）：
+
+- `event_loop`: 异步事件循环
+- `temp_workspace`: 临时工作区目录
+- `workspace`: SharedWorkspace 实例
+- `sample_paper`: 单个示例论文
+- `sample_papers`: 多个示例论文
+
+## 编写新测试
+
+1. 在对应的测试文件中添加测试方法
+2. 使用 `@pytest.mark.asyncio` 装饰器标记异步测试
+3. 使用 fixtures 获取测试数据
+4. 使用 assert 语句验证结果
+
+示例：
+
+```python
+@pytest.mark.asyncio
+async def test_my_feature(workspace, sample_paper):
+    """测试我的新功能"""
+    # 准备
+    record = LiteratureRecord(...)
+    await workspace.add_literature(record)
+
+    # 执行
+    result = await workspace.get_literature()
+
+    # 验证
+    assert len(result) == 1
+    assert result[0].id == record.id
+```
+
+## CI/CD
+
+测试可以在 CI/CD 流水线中自动运行：
 
 ```yaml
-name: Tests
-
-on: [push, pull_request]
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-      - run: pip install -r requirements.txt
-      - run: pytest tests/ --cov=src --cov-report=xml
-      - uses: codecov/codecov-action@v3
+- name: Run tests
+  run: pytest --cov=src --cov-report=xml
 ```
-
-## 问题排查
-
-### 测试失败处理
-
-1. **ImportError**: 确保所有依赖已安装
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. **AsyncIO警告**: 确保使用 `pytest-asyncio`
-   ```bash
-   pip install pytest-asyncio
-   ```
-
-3. **配置文件未找到**: 测试会自动创建临时配置
-
-## 下一步
-
-- [ ] 添加 Search/Cluster/Summary Agent 测试
-- [ ] 添加端到端集成测试
-- [ ] 提高覆盖率到 80%+
