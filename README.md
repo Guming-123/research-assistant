@@ -28,6 +28,8 @@
 ## 核心功能
 
 1. **Search Agent**: 多源文献检索、去重、标准化
+   - **支持的数据库**：arXiv、PubMed、DBLP、Europe PMC、OpenAlex（全部免费）
+   - 无需 API Key，开箱即用
 2. **Screen Agent**: 基于归一化频率(NF)的相关性筛选
 3. **Cluster Agent**: HDBSCAN语义聚类、主题发现
 4. **Summary Agent**: 层级RQ驱动的结构化摘要生成
@@ -183,11 +185,21 @@ research_assistant/
 
 ## 技术栈
 
-- **LLM框架**: LangChain (支持 OpenAI 和 GLM API)
+- **LLM框架**: LangChain (支持 GLM API)
 - **向量检索**: FAISS / NumPy fallback
 - **聚类**: HDBSCAN / scikit-learn
 - **PDF处理**: PyMuPDF / PyPDF2
 - **异步IO**: asyncio / aiohttp
+
+### 支持的论文数据库（全部免费）
+
+| 数据库 | 领域 | 说明 |
+|--------|------|------|
+| **arXiv** | 计算机科学、物理、数学 | 预印本论文，更新快 |
+| **PubMed** | 医学、生物学 | 美国国家医学图书馆 |
+| **DBLP** | 计算机科学 | 计算机科学文献数据库 |
+| **Europe PMC** | 生命科学、生物医学 | 欧洲开放获取文献 |
+| **OpenAlex** | 跨学科 | 最大的开放学术引用数据库 |
 
 ### LLM 提供商支持
 

@@ -37,7 +37,13 @@ agents:
   search:
     model: "glm-4-flash"  # 使用快速模型减少成本
     temperature: 0.3
-    default_databases: ["semantic_scholar", "arxiv"]
+    # 支持的数据库（全部免费，无需 API Key）
+    # - arxiv: 计算机科学、物理、数学
+    # - pubmed: 医学、生物学
+    # - dblp: 计算机科学文献
+    # - europe_pmc: 生命科学、生物医学
+    # - openalex: 跨学科开放获取文献
+    default_databases: ["arxiv", "openalex", "dblp"]
     enable_pdf_download: false
     max_concurrent_requests: 5
 

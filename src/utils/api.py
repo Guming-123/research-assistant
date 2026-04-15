@@ -244,6 +244,7 @@ class ArxivAPI:
 
         except (aiohttp.ClientError, Exception) as e:
             logger.error(f"arXiv API request failed: {e}")
+            logger.error(f"Query was: {search_query}")
             return []
 
 

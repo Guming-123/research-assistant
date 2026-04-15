@@ -15,7 +15,14 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from ..core.agent import BaseAgent, AgentConfig, AgentResult
 from ..core.workspace import LiteratureRecord, SharedWorkspace
-from ..utils.api import SemanticScholarAPI, ArxivAPI, multi_source_search, deduplicate_papers
+from ..utils.api import ArxivAPI, deduplicate_papers
+from ..utils.api_extended import (
+    PubMedAPI,
+    DBLPAPI,
+    EuropePMCAPI,
+    OpenAlexAPI,
+    search_all_databases,
+)
 from ..utils.pdf import extract_text_from_pdf
 from ..utils.llm import get_llm_client
 from ..utils.exceptions import SearchError, APIError, LLMError, ValidationError
@@ -70,8 +77,6 @@ class SearchAgent(BaseAgent):
             temperature=0.3,
         )
         super().__init__(config, workspace, llm_client)
-
-        self.s2_api_key: Optional[str] = None
 
     def validate_input(self, **kwargs) -> bool:
         """验证输入参数"""
@@ -188,29 +193,31 @@ class SearchAgent(BaseAgent):
             return self._default_search_queries(research_topic)
 
     def _default_search_queries(self, research_topic: str) -> List[Dict[str, str]]:
-        """默认搜索查询策略"""
+        """默认搜索查询策略（使用多数据库）"""
         # 提取关键词
         keywords = research_topic.split()
 
         queries = []
 
-        # 通用查询
+        # 主要查询 - 使用多个数据库
         queries.append({
-            "database": "semantic_scholar",
+            "database": "multi",
             "query": research_topic,
-            "description": "General search for the research topic",
+            "description": "Multi-database search",
+            "databases": ["arxiv", "pubmed", "openalex"],
         })
 
         # 关键词组合查询
         if len(keywords) > 1:
-            for i in range(len(keywords)):
-                for j in range(i + 1, min(i + 3, len(keywords))):
-                    query = f"{keywords[i]} {keywords[j]}"
-                    queries.append({
-                        "database": "semantic_scholar",
-                        "query": query,
-                        "description": f"Keyword combination: {query}",
-                    })
+            # 只取前 2 个关键词组合
+            for i in range(min(2, len(keywords) - 1)):
+                query = f"{keywords[i]} {keywords[i + 1]}"
+                queries.append({
+                    "database": "multi",
+                    "query": query,
+                    "description": f"Keyword combination: {query}",
+                    "databases": ["arxiv", "dblp", "openalex"],
+                })
 
         return queries
 
@@ -221,7 +228,7 @@ class SearchAgent(BaseAgent):
         max_results: int,
     ) -> List[Dict[str, Any]]:
         """
-        多源检索
+        多源检索（使用新的数据库 API）
 
         Args:
             queries: 查询列表
@@ -234,31 +241,96 @@ class SearchAgent(BaseAgent):
         all_papers = []
         results_per_query = max(10, max_results // len(queries))
 
-        # Semantic Scholar搜索
-        async with SemanticScholarAPI(api_key=self.s2_api_key) as s2_client:
-            for query_info in queries:
-                if query_info["database"] in ["semantic_scholar", "both"]:
-                    papers = await s2_client.search_papers(
-                        query=query_info["query"],
-                        year_range=year_range,
-                        limit=results_per_query,
-                    )
-                    all_papers.extend(papers)
-                    self.log_progress(f"S2: {query_info['query']} -> {len(papers)} papers")
-                    await asyncio.sleep(1.5)  # 增加 S2 API 请求间隔（避免 429 错误）
+        self.log_progress(f"Executing {len(queries)} search queries ({results_per_query} papers each)...")
 
-        # arXiv搜索
-        async with ArxivAPI() as arxiv_client:
-            for query_info in queries:
-                if query_info["database"] in ["arxiv", "both"]:
-                    papers = await arxiv_client.search_papers(
-                        query=query_info["query"],
-                        max_results=results_per_query,
-                    )
-                    all_papers.extend(papers)
-                    self.log_progress(f"arXiv: {query_info['query']} -> {len(papers)} papers")
-                    await asyncio.sleep(0.1)
+        for query_info in queries:
+            query = query_info["query"]
+            databases = query_info.get("databases", ["arxiv", "openalex"])
 
+            self.log_progress(f"Query: '{query}' from {len(databases)} databases")
+
+            # arXiv
+            if "arxiv" in databases:
+                try:
+                    self.log_progress(f"  → arXiv: {query}")
+                    async with ArxivAPI() as api:
+                        papers = await api.search_papers(
+                            query=query,
+                            max_results=results_per_query,
+                        )
+                        all_papers.extend(papers)
+                        self.log_progress(f"  ✓ arXiv: {len(papers)} papers")
+                        await asyncio.sleep(0.5)
+                except Exception as e:
+                    self.log_progress(f"  ✗ arXiv failed: {e}", "warning")
+
+            # PubMed
+            if "pubmed" in databases:
+                try:
+                    self.log_progress(f"  → PubMed: {query}")
+                    async with PubMedAPI() as api:
+                        papers = await api.search_papers(
+                            query=query,
+                            max_results=results_per_query,
+                            year_range=year_range,
+                        )
+                        all_papers.extend(papers)
+                        self.log_progress(f"  ✓ PubMed: {len(papers)} papers")
+                        await asyncio.sleep(0.5)
+                except Exception as e:
+                    self.log_progress(f"  ✗ PubMed failed: {e}", "warning")
+
+            # DBLP
+            if "dblp" in databases:
+                try:
+                    self.log_progress(f"  → DBLP: {query}")
+                    async with DBLPAPI() as api:
+                        papers = await api.search_papers(
+                            query=query,
+                            max_results=results_per_query,
+                        )
+                        all_papers.extend(papers)
+                        self.log_progress(f"  ✓ DBLP: {len(papers)} papers")
+                        await asyncio.sleep(0.5)
+                except Exception as e:
+                    self.log_progress(f"  ✗ DBLP failed: {e}", "warning")
+
+            # Europe PMC
+            if "europe_pmc" in databases:
+                try:
+                    self.log_progress(f"  → Europe PMC: {query}")
+                    async with EuropePMCAPI() as api:
+                        papers = await api.search_papers(
+                            query=query,
+                            max_results=results_per_query,
+                            year_range=year_range,
+                        )
+                        all_papers.extend(papers)
+                        self.log_progress(f"  ✓ Europe PMC: {len(papers)} papers")
+                        await asyncio.sleep(0.5)
+                except Exception as e:
+                    self.log_progress(f"  ✗ Europe PMC failed: {e}", "warning")
+
+            # OpenAlex
+            if "openalex" in databases:
+                try:
+                    self.log_progress(f"  → OpenAlex: {query}")
+                    async with OpenAlexAPI() as api:
+                        papers = await api.search_papers(
+                            query=query,
+                            max_results=results_per_query,
+                            year_range=year_range,
+                        )
+                        all_papers.extend(papers)
+                        self.log_progress(f"  ✓ OpenAlex: {len(papers)} papers")
+                        await asyncio.sleep(0.5)
+                except Exception as e:
+                    self.log_progress(f"  ✗ OpenAlex failed: {e}", "warning")
+
+            # 延迟避免过度请求
+            await asyncio.sleep(1.0)
+
+        self.log_progress(f"Total papers retrieved: {len(all_papers)}")
         return all_papers
 
     async def _standardize_records(
