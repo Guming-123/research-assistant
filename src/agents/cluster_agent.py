@@ -123,11 +123,7 @@ class ClusterAgent(BaseAgent):
                 # 如果没有embeddings，生成它们
                 self.log_progress("Generating embeddings...")
 
-                # 临时限制：最多处理 500 篇论文（测试用）
-                papers_limited = papers[:500] if len(papers) > 500 else papers
-                self.log_progress(f"Limited to {len(papers_limited)} papers for testing")
-
-                texts = [f"{p.title}\n{p.abstract or ''}" for p in papers_limited]
+                texts = [f"{p.title}\n{p.abstract or ''}" for p in papers]
                 self.log_progress(f"Prepared {len(texts)} texts for embedding")
 
                 self.log_progress("Calling get_embeddings...")
@@ -138,8 +134,15 @@ class ClusterAgent(BaseAgent):
                 self.log_progress(f"get_embeddings returned in {elapsed:.2f}s: {len(embeddings)} embeddings")
 
                 self.log_progress("Creating embeddings dictionary...")
-                embeddings_dict = {p.id: emb for p, emb in zip(papers_limited, embeddings)}
+                embeddings_dict = {p.id: emb for p, emb in zip(papers, embeddings)}
                 self.log_progress(f"Dictionary created with {len(embeddings_dict)} entries")
+
+            # 限制处理的论文数量（避免大数据量卡住）
+            max_papers = kwargs.get("max_papers", 500)
+            if len(embeddings_dict) > max_papers:
+                self.log_progress(f"Limiting from {len(embeddings_dict)} to {max_papers} papers")
+                paper_ids = list(embeddings_dict.keys())[:max_papers]
+                embeddings_dict = {pid: embeddings_dict[pid] for pid in paper_ids}
 
             # 过滤有embedding的论文
             self.log_progress("Filtering papers with embeddings...")
