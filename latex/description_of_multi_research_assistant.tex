@@ -1,0 +1,83 @@
+\documentclass[preprint,12pt,authoryear]{elsarticle}
+
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{lineno}
+
+\usepackage[colorlinks=true,urlcolor=red,citecolor=blue%
+anchorcolor=black,linkcolor=black]{hyperref}
+\usepackage{comment}
+\usepackage{soul}
+\usepackage{color}
+\usepackage{amsmath}
+\usepackage{amsbsy}
+\usepackage{dsfont}
+\usepackage{subfigure}
+\usepackage{threeparttable}
+\usepackage{multirow}
+\newcommand{\tabincell}[2]{\begin{tabular}{@{}#1@{}}#2\end{tabular}}
+\usepackage{colortbl, booktabs}
+\usepackage[dvipsnames]{xcolor}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{eurosym}
+\usepackage{fullpage}
+\usepackage{listings}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds}
+
+%% 中文支持（使用 XeLaTeX 或 LuaLaTeX 编译）
+\usepackage{ctex}
+
+% Listings style for Python code
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\scriptsize,
+  keywordstyle=\color{blue},
+  commentstyle=\color{OliveGreen},
+  stringstyle=\color{red},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  frame=single,
+  breaklines=true,
+  captionpos=b
+}
+
+% Revision commands
+\newcommand{\lwnotes}[1]{\textcolor{cyan}{(Note: #1)}}
+\newcommand{\lwedits}{\textcolor{cyan}}
+
+\journal{IEEE Access}
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{基于多Agent协作的自动化文献综述系统：\\聚焦底层原理分析与反幻觉保障}
+
+\author[label1]{LeiWang Zhang}
+
+\begin{abstract}
+本文设计并实现了一套基于多Agent协作的自动化文献综述系统，覆盖从文献检索到结构化综述报告生成的全流程。系统采用协调者-代理（Coordinator-Agent）架构，由四个专业化Agent——检索（Search）、筛选（Screen）、聚类（Cluster）、摘要（Summary）——组成四阶段流水线，以层级研究问题（RQ）树驱动整个流程。核心创新包括：（1）三级筛选机制，结合基于嵌入的余弦相似度与LLM辅助的边界区域判定；（2）GPU加速的PCA降维与HDBSCAN聚类实现语义主题发现；（3）两阶段LLM报告生成策略，通过反幻觉提示词工程强制要求公式级分析、推导链条和第一性原理理论极限推导；（4）层级RQ树驱动筛选-聚类-摘要全流程。系统集成五个免费学术数据库（arXiv、PubMed、DBLP、Europe PMC、OpenAlex），支持命令行和Web界面两种交互方式。实验结果表明，系统能在数分钟内处理数百篇文献，生成包含强制公式解读和定量对比的结构化综述报告。
+\end{abstract}
+
+\begin{keyword}
+多Agent系统 \sep 文献综述自动化 \sep 大语言模型 \sep 语义聚类 \sep 反幻觉 \sep 提示词工程
+\end{keyword}
+
+\end{frontmatter}
+
+\input{sec-01-intro}
+\input{sec-02-lit-rev}
+\input{sec-03-model}
+\input{sec-04-method}
+\input{sec-05-exp}
+\input{sec-06-concl}
+
+
+\section*{参考文献}
+\bibliographystyle{elsarticle-harv}
+\bibliography{bib-template}
+
+\end{document}

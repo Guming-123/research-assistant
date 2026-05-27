@@ -1,0 +1,95 @@
+\section{系统演示与性能分析}
+\label{sec:exp}
+
+本节展示系统的性能特征和能力演示。
+
+\subsection{实验环境}
+
+系统基于Python 3.10+实现，主要依赖如下：
+\begin{itemize}
+    \item \textbf{LLM框架：}LangChain + OpenAI兼容接口
+    \item \textbf{默认LLM：}智谱AI GLM-4-Plus
+    \item \textbf{嵌入模型：}BGE-small-zh-v1.5（本地）、all-MiniLM-L6-v2（本地）、GLM embedding-3（远程）
+    \item \textbf{降维：}PyTorch CUDA PCA、scikit-learn t-SNE
+    \item \textbf{聚类：}HDBSCAN
+    \item \textbf{向量索引：}FAISS（GPU $>$ CPU $>$ NumPy回退链）
+    \item \textbf{异步框架：}asyncio + aiohttp
+    \item \textbf{Web界面：}Gradio
+\end{itemize}
+
+\subsection{性能优化}
+
+表~\ref{tbl:optimizations}总结了系统中实现的关键性能优化。
+
+\begin{table}[htbp]
+    \centering
+    \caption{性能优化技术}
+    \label{tbl:optimizations}
+    \begin{tabular}{lp{7cm}}
+    \toprule
+    优化项 & 实现方式 \\
+    \midrule
+    LLM并发控制 & 全局\texttt{asyncio.Semaphore(5)}，所有LLM调用通过基类统一限流 \\
+    GPU加速 & PyTorch CUDA PCA降维，FAISS向量索引（优先GPU） \\
+    批量处理 & 相似度矩阵一次矩阵乘法完成；批量嵌入生成 \\
+    LLM客户端缓存 & 按模型+参数组合缓存ChatOpenAI实例 \\
+    嵌入复用 & 聚类阶段复用已缓存的嵌入，仅计算缺失部分 \\
+    异步并行 & 通过\texttt{asyncio.gather}并行生成聚类摘要 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{流水线执行流程}
+
+对于典型研究主题，执行流程如下：
+
+\begin{enumerate}
+    \item \textbf{RQ生成}（$<1$秒）：RQ管理器根据研究主题生成三级RQ树。以"降低晶体管亚阈值摆幅的方法"为主题，RQ树将包含RQ1（方法论）、RQ2（应用）、RQ3（趋势），每个维度下含聚焦核心公式、推导链条、理论极限和模型假设的第二级和第三级子问题。
+
+    \item \textbf{检索}（2--5分钟）：检索Agent生成8--10条查询，在多个数据库中搜索。考虑速率限制（arXiv 3秒延迟，其他0.5秒），一次典型运行检索200--500篇论文。
+
+    \item \textbf{筛选}（1--3分钟）：嵌入计算是此阶段的主要耗时。余弦相似度矩阵通过单次矩阵运算完成。边界区域论文（通常占候选论文的20--40\%）送入LLM判定。
+
+    \item \textbf{聚类}（30秒--2分钟）：PCA和t-SNE由GPU加速。HDBSCAN在CPU上运行。聚类标签生成涉及并行LLM调用。
+
+    \item \textbf{摘要}（2--5分钟）：两次顺序LLM调用生成最终报告。聚类摘要并行生成。始终生成回退报告作为备份。
+\end{enumerate}
+
+\subsection{输出质量}
+
+生成的报告遵循结构化格式，包含以下章节：
+\begin{enumerate}
+    \item \textbf{引言：}研究背景、从物理/数学视角阐述核心挑战
+    \item \textbf{核心技术原理：}按聚类分析，包含：
+    \begin{itemize}
+        \item 核心公式及逐符号解读
+        \item 从基本定律出发的推导链条
+        \item 关键参数和理论极限
+        \item 定量比较表格
+    \end{itemize}
+    \item \textbf{实际技术效果：}按应用场景展示公式适配的量化指标
+    \item \textbf{技术演进与物理极限：}各代方法的公式演进、从第一性原理推导理论极限
+    \item \textbf{根因分析与突破路径：}公式层面的瓶颈识别、未解决的基础性问题
+    \item \textbf{结论：}核心公式级发现和定量总结
+\end{enumerate}
+
+\subsection{Web界面}
+
+系统提供基于Gradio的Web界面，包含五个功能Tab：
+
+\begin{figure}[htbp]
+    \centering
+    \begin{tikzpicture}[
+        tab/.style={rectangle, draw, rounded corners, fill=blue!8, minimum width=2cm, minimum height=1.4cm, align=center, font=\scriptsize}
+    ]
+        \node[tab] (t1) at (0,0)    {新建综述\\输入主题\\执行流水线};
+        \node[tab] (t2) at (2.6,0)  {文献库\\浏览和筛选\\论文列表};
+        \node[tab] (t3) at (5.2,0)  {聚类可视化\\2D散点图\\主题分布};
+        \node[tab] (t4) at (7.8,0)  {综述报告\\查看生成的\\报告文档};
+        \node[tab] (t5) at (10.4,0) {系统状态\\工作区统计\\RQ树};
+    \end{tikzpicture}
+    \caption{Web界面Tab结构}
+    \label{fig:webui}
+\end{figure}
+
+界面支持实时流水线执行与进度日志、多主题管理，以及聚类结果的数据可视化。
