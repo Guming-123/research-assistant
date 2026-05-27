@@ -10,10 +10,12 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Callable
 import logging
 
+import yaml
+from pathlib import Path
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from .agent import BaseAgent, AgentConfig, AgentResult
+from .agent import BaseAgent, AgentConfig, AgentResult, get_agent_model
 from .workspace import SharedWorkspace
 from .rq_manager import RQManager, RQLevel, ResearchQuestion
 
@@ -105,7 +107,7 @@ class Coordinator(BaseAgent):
         config = config or AgentConfig(
             name="Coordinator",
             description="Coordinates all agents in the literature review system",
-            model="glm-4-plus",
+            model=get_agent_model("coordinator"),
             temperature=0.3,
         )
         super().__init__(config, workspace, llm_client)
@@ -148,10 +150,14 @@ class Coordinator(BaseAgent):
         auto_mode = kwargs.get("auto_mode", False)  # 自动模式，跳过人工审核
 
         try:
+            # 设置工作区 topic 上下文
+            self.workspace.set_topic(research_topic)
+
             # 初始化RQ树
             self.log_progress(f"Initializing RQ tree for: {research_topic}")
             await self.rq_manager.initialize_from_topic(research_topic)
             await self._advance_stage(Stage.INITIALIZATION)
+            self.task_state.completed_stages.append(Stage.INITIALIZATION)
 
             # 创建初始检查点
             checkpoint_name = f"init_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -235,40 +241,70 @@ class Coordinator(BaseAgent):
         if not agent:
             raise ValueError(f"Agent not found: {decision.target_agent}")
 
+        # 提前推进阶段，使进度回调能显示当前正在执行的阶段
+        await self._advance_stage(stage)
+
         self.log_progress(f"Executing {stage.value} stage with {agent.name}")
 
         # 准备执行参数
         exec_params = await self._prepare_stage_params(stage)
 
-        # 执行Agent
+        # 执行Agent（记录耗时）
+        import time as _time
+        t0 = _time.monotonic()
         result = await agent.run(**exec_params)
+        elapsed = _time.monotonic() - t0
 
         # 处理结果
         if result.success:
             self.task_state.completed_stages.append(stage)
-            self.task_state.metrics[f"{stage.value}_metrics"] = result.metrics
-            await self._advance_stage(stage)
-            self.log_progress(f"Completed {stage.value} stage: {result.metrics}")
+            metrics = dict(result.metrics)
+            metrics["elapsed_seconds"] = elapsed
+            self.task_state.metrics[f"{stage.value}_metrics"] = metrics
+            self.log_progress(f"Completed {stage.value} stage ({elapsed:.1f}s): {result.metrics}")
         else:
             self.task_state.errors.extend(result.errors)
             raise RuntimeError(f"Stage {stage.value} failed: {result.errors}")
 
+    @staticmethod
+    def _load_config() -> Dict[str, Any]:
+        """从 config.yaml 读取配置"""
+        cfg_path = Path(__file__).resolve().parent.parent.parent / "config.yaml"
+        if cfg_path.exists():
+            return yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        return {}
+
     async def _prepare_stage_params(self, stage: Stage) -> Dict[str, Any]:
         """为阶段准备执行参数"""
+        cfg = self._load_config()
         params = {}
 
         if stage == Stage.SEARCH:
+            await self.workspace.clear_topic()
+            self.log_progress("Cleared derived data for current topic (papers preserved)")
+
+            search_cfg = cfg.get("search", {})
             params["research_topic"] = self.rq_manager.current_tree.research_topic
-            params["year_range"] = (2018, 2025)  # 默认值
-            params["max_results"] = 500
+            params["year_range"] = (
+                search_cfg.get("default_year_start", 2018),
+                search_cfg.get("default_year_end", 2025),
+            )
+            params["max_results"] = search_cfg.get("default_max_results", 2000)
 
         elif stage == Stage.SCREEN:
+            screen_cfg = cfg.get("agents", {}).get("screen", {})
             params["rq_ids"] = [rq.id for rq in self.rq_manager.get_level_questions(RQLevel.LEVEL_1)]
-            params["threshold"] = 0.7  # NF阈值
+            params["threshold"] = screen_cfg.get("default_nf_threshold", 0.66)
+            params["llm_threshold"] = (
+                screen_cfg.get("auto_reject_threshold", 0.68),
+                screen_cfg.get("auto_approve_threshold", 0.75),
+            )
 
         elif stage == Stage.CLUSTER:
-            params["method"] = "HDBSCAN"
-            params["min_cluster_size"] = 5
+            cluster_cfg = cfg.get("agents", {}).get("cluster", {})
+            params["method"] = cluster_cfg.get("method", "HDBSCAN").upper()
+            params["min_cluster_size"] = cluster_cfg.get("min_cluster_size", 6)
+            params["research_topic"] = self.rq_manager.current_tree.research_topic
 
         elif stage == Stage.SUMMARY:
             params["rq_tree"] = self.rq_manager.current_tree

@@ -56,13 +56,15 @@ class LiteratureReviewCLI:
             return
 
         async with self._init_lock:
-            # 双重检查：可能在等待锁期间已被其他协程初始化
             if self._initialized:
                 return
 
             try:
                 await self.workspace.load_all()
                 await self.rq_manager.load()
+                # 如果没有设置 topic，从 RQ 树恢复最近使用的 topic
+                if not self.workspace.topic and self.rq_manager.current_tree:
+                    self.workspace.set_topic(self.rq_manager.current_tree.research_topic)
                 logger.info("Loaded existing workspace data")
             except Exception as e:
                 logger.debug(f"No existing workspace data: {e}")

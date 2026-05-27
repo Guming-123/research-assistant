@@ -29,6 +29,9 @@ def _get_local_model(model_name: str):
         return _local_models[model_name]
 
     try:
+        # 强制离线模式，避免联网超时
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
         # 检测是否可用GPU
         import torch
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -78,6 +81,10 @@ def _get_local_model(model_name: str):
         )
     except Exception as e:
         logger.error(f"Failed to load local model {model_name}: {e}")
+        # 回退到已缓存的模型
+        if model_name != "local-zh":
+            logger.warning(f"Falling back to local-zh (BGE-small-zh-v1.5)")
+            return _get_local_model("local-zh")
         raise
 
 
@@ -94,6 +101,29 @@ def _run_local_model(model, texts: List[str]) -> List[List[float]]:
         return embeddings.tolist()
     else:
         raise ValueError(f"Unknown model type: {type(model)}")
+
+
+def detect_language(texts: List[str]) -> str:
+    """检测文本主要语言，返回 'zh' 或 'en'"""
+    en_chars = 0
+    zh_chars = 0
+    for t in texts[:20]:
+        for ch in t:
+            if '一' <= ch <= '鿿':
+                zh_chars += 1
+            elif ch.isascii() and ch.isalpha():
+                en_chars += 1
+    return 'zh' if zh_chars > en_chars else 'en'
+
+
+def select_embedding_model(texts: List[str], preferred_model: str = None) -> str:
+    """根据文本语言自动选择嵌入模型"""
+    if preferred_model and preferred_model not in ("local-zh", "local-en", "local"):
+        return preferred_model
+    lang = detect_language(texts)
+    if lang == 'zh':
+        return "local-zh"
+    return "local-en"
 
 
 async def get_embeddings(
@@ -114,6 +144,11 @@ async def get_embeddings(
     Returns:
         embedding向量列表
     """
+    # 自动选择模型
+    if model == "auto":
+        model = select_embedding_model(texts)
+        logger.info(f"Auto-selected embedding model: {model}")
+
     # 判断是否使用本地模型
     is_local = not model.startswith("embedding") and not model.startswith("text-embedding")
 
@@ -242,7 +277,7 @@ def compute_similarity_matrix(
     method: str = "cosine",
 ) -> np.ndarray:
     """
-    计算相似度矩阵
+    计算相似度矩阵（向量化实现，支持 GPU 加速）
 
     Args:
         embeddings: embedding向量列表
@@ -251,14 +286,23 @@ def compute_similarity_matrix(
     Returns:
         相似度矩阵
     """
-    n = len(embeddings)
-    matrix = np.zeros((n, n))
+    arr = np.array(embeddings, dtype=np.float32)
 
-    for i in range(n):
-        for j in range(i, n):
-            sim = compute_similarity(embeddings[i], embeddings[j], method)
-            matrix[i][j] = sim
-            matrix[j][i] = sim
+    if method == "cosine":
+        # L2 归一化
+        norms = np.linalg.norm(arr, axis=1, keepdims=True)
+        norms[norms == 0] = 1
+        normalized = arr / norms
+        # 矩阵乘法计算所有余弦相似度
+        matrix = normalized @ normalized.T
+    elif method == "euclidean":
+        # 欧氏距离 → 相似度
+        dists = np.linalg.norm(arr[:, None] - arr[None, :], axis=2)
+        matrix = 1 / (1 + dists)
+    elif method == "dot":
+        matrix = arr @ arr.T
+    else:
+        raise ValueError(f"Unknown similarity method: {method}")
 
     return matrix
 
@@ -270,7 +314,7 @@ def find_most_similar(
     method: str = "cosine",
 ) -> List[Tuple[int, float]]:
     """
-    找到最相似的向量
+    找到最相似的向量（向量化实现）
 
     Args:
         query_embedding: 查询向量
@@ -281,14 +325,25 @@ def find_most_similar(
     Returns:
         [(索引, 相似度), ...] 列表
     """
-    similarities = []
-    for i, emb in enumerate(corpus_embeddings):
-        sim = compute_similarity(query_embedding, emb, method)
-        similarities.append((i, sim))
+    query = np.array(query_embedding, dtype=np.float32)
+    corpus = np.array(corpus_embeddings, dtype=np.float32)
 
-    # 按相似度排序
-    similarities.sort(key=lambda x: x[1], reverse=True)
-    return similarities[:top_k]
+    if method == "cosine":
+        q_norm = np.linalg.norm(query)
+        c_norms = np.linalg.norm(corpus, axis=1)
+        if q_norm == 0:
+            return [(i, 0.0) for i in range(min(top_k, len(corpus_embeddings)))]
+        similarities = (corpus @ query) / (c_norms * q_norm + 1e-8)
+    elif method == "euclidean":
+        distances = np.linalg.norm(corpus - query, axis=1)
+        similarities = 1 / (1 + distances)
+    elif method == "dot":
+        similarities = corpus @ query
+    else:
+        raise ValueError(f"Unknown similarity method: {method}")
+
+    top_indices = np.argsort(similarities)[::-1][:top_k]
+    return [(int(i), float(similarities[i])) for i in top_indices]
 
 
 def normalize_embeddings(embeddings: List[List[float]]) -> List[List[float]]:
@@ -314,63 +369,94 @@ def normalize_embeddings(embeddings: List[List[float]]) -> List[List[float]]:
 
 class FAISSIndex:
     """
-    简化的FAISS索引封装
+    FAISS索引封装（优先使用 faiss-gpu/faiss-cpu，回退到 numpy）
 
-    使用numpy实现基础的向量检索功能
-    （当FAISS不可用时的fallback方案）
+    支持三种后端：
+    1. faiss-gpu: GPU 加速向量检索
+    2. faiss-cpu: CPU 高效向量检索
+    3. numpy: 纯 Python 回退方案
     """
 
     def __init__(self, embeddings: List[List[float]], ids: Optional[List[str]] = None):
-        """
-        初始化索引
-
-        Args:
-            embeddings: embedding向量列表
-            ids: 对应的ID列表
-        """
-        self.embeddings = np.array(embeddings)
         self.ids = ids or [str(i) for i in range(len(embeddings))]
+        self.embeddings_np = np.array(embeddings, dtype=np.float32)
+        self._faiss_index = None
+
+        # 尝试构建 faiss 索引
+        try:
+            import faiss
+
+            dim = self.embeddings_np.shape[1]
+            # L2 归一化（用于余弦相似度）
+            norms = np.linalg.norm(self.embeddings_np, axis=1, keepdims=True)
+            norms[norms == 0] = 1
+            normalized = self.embeddings_np / norms
+
+            index = faiss.IndexFlatIP(dim)  # 内积索引（归一化后等价于余弦相似度）
+
+            # 尝试 GPU
+            try:
+                res = faiss.StandardGpuResources()
+                index = faiss.index_cpu_to_gpu(res, 0, index)
+                self._backend = "faiss-gpu"
+            except Exception:
+                self._backend = "faiss-cpu"
+
+            index.add(normalized)
+            self._faiss_index = index
+            self._normalized = normalized
+            logger.info(f"FAISS index built ({self._backend}, {len(embeddings)} vectors)")
+        except ImportError:
+            self._backend = "numpy"
+            logger.info("faiss not available, using numpy fallback")
 
     def search(
         self,
         query_embedding: List[float],
         top_k: int = 5,
     ) -> List[Tuple[str, float]]:
-        """
-        搜索最相似的向量
+        if self._faiss_index is not None:
+            return self._faiss_search(query_embedding, top_k)
+        return self._numpy_search(query_embedding, top_k)
 
-        Args:
-            query_embedding: 查询向量
-            top_k: 返回前k个结果
+    def _faiss_search(
+        self,
+        query_embedding: List[float],
+        top_k: int,
+    ) -> List[Tuple[str, float]]:
+        """faiss 向量检索"""
+        query = np.array([query_embedding], dtype=np.float32)
+        norm = np.linalg.norm(query)
+        if norm > 0:
+            query = query / norm
 
-        Returns:
-            [(ID, 相似度), ...] 列表
-        """
-        query = np.array(query_embedding)
+        scores, indices = self._faiss_index.search(query, min(top_k, len(self.ids)))
 
-        # 计算与所有向量的余弦相似度
-        similarities = []
-        for i, emb in enumerate(self.embeddings):
-            sim = compute_similarity(query, emb.tolist(), "cosine")
-            similarities.append((self.ids[i], sim))
+        results = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx >= 0:
+                results.append((self.ids[idx], float(score)))
+        return results
 
-        # 排序并返回top-k
-        similarities.sort(key=lambda x: x[1], reverse=True)
-        return similarities[:top_k]
+    def _numpy_search(
+        self,
+        query_embedding: List[float],
+        top_k: int,
+    ) -> List[Tuple[str, float]]:
+        """numpy 向量检索（回退方案）"""
+        query = np.array(query_embedding, dtype=np.float32)
+        norms = np.linalg.norm(self.embeddings_np, axis=1)
+        query_norm = np.linalg.norm(query)
+        if query_norm == 0:
+            return [(self.ids[i], 0.0) for i in range(min(top_k, len(self.ids)))]
+
+        similarities = self.embeddings_np @ query / (norms * query_norm + 1e-8)
+        top_indices = np.argsort(similarities)[::-1][:top_k]
+        return [(self.ids[i], float(similarities[i])) for i in top_indices]
 
 
 async def build_faiss_index(
     embeddings: List[List[float]],
     ids: Optional[List[str]] = None,
 ) -> FAISSIndex:
-    """
-    构建FAISS索引
-
-    Args:
-        embeddings: embedding向量列表
-        ids: 对应的ID列表
-
-    Returns:
-        FAISSIndex实例
-    """
     return FAISSIndex(embeddings, ids)

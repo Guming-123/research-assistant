@@ -10,6 +10,8 @@ from datetime import datetime
 import asyncio
 import json
 import logging
+import yaml
+from pathlib import Path
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -17,6 +19,30 @@ from langchain_openai import ChatOpenAI
 from .workspace import SharedWorkspace
 from ..utils.llm import get_llm_client
 from ..utils.exceptions import LLMError, ValidationError
+
+# 全局 LLM 并发信号量（控制同时向 GLM API 发送的请求数）
+_LLM_SEMAPHORE = asyncio.Semaphore(5)
+logger = logging.getLogger(__name__)
+
+_CONFIG_CACHE: Optional[Dict[str, Any]] = None
+
+
+def get_config() -> Dict[str, Any]:
+    """读取并缓存 config.yaml"""
+    global _CONFIG_CACHE
+    if _CONFIG_CACHE is None:
+        cfg_path = Path(__file__).resolve().parent.parent.parent / "config.yaml"
+        if cfg_path.exists():
+            _CONFIG_CACHE = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        else:
+            _CONFIG_CACHE = {}
+    return _CONFIG_CACHE
+
+
+def get_agent_model(agent_name: str, default: str = "glm-4-flash") -> str:
+    """从 config.yaml 读取指定 agent 的模型名"""
+    cfg = get_config()
+    return cfg.get("agents", {}).get(agent_name, {}).get("model", default)
 
 
 @dataclass
@@ -27,7 +53,7 @@ class AgentConfig:
     description: str
     model: str = "gpt-4o"
     temperature: float = 0.7
-    max_tokens: int = 4000
+    max_tokens: int = 8000
     enable_streaming: bool = False
     retry_attempts: int = 3
     timeout: int = 120
@@ -139,7 +165,7 @@ class BaseAgent(ABC):
         **kwargs,
     ) -> str:
         """
-        调用LLM的通用方法
+        调用LLM的通用方法（带并发信号量）
 
         Args:
             messages: 消息列表
@@ -149,22 +175,23 @@ class BaseAgent(ABC):
         Returns:
             str: LLM响应
         """
-        try:
-            if response_format:
-                kwargs["response_format"] = {"type": "json_object"}
+        async with _LLM_SEMAPHORE:
+            try:
+                if response_format:
+                    kwargs["response_format"] = {"type": "json_object"}
 
-            response = await self.llm.ainvoke(messages, **kwargs)
-            return response.content
+                response = await self.llm.ainvoke(messages, **kwargs)
+                return response.content
 
-        except (ConnectionError, TimeoutError) as e:
-            self.log_progress(f"LLM连接失败: {e}", "error")
-            raise LLMError(f"LLM connection error: {e}") from e
-        except json.JSONDecodeError as e:
-            self.log_progress(f"LLM返回的JSON格式错误: {e}", "error")
-            raise LLMError(f"LLM returned invalid JSON: {e}") from e
-        except Exception as e:
-            self.log_progress(f"LLM调用失败: {e}", "error")
-            raise LLMError(f"LLM invocation failed: {e}") from e
+            except (ConnectionError, TimeoutError) as e:
+                self.log_progress(f"LLM连接失败: {e}", "error")
+                raise LLMError(f"LLM connection error: {e}") from e
+            except json.JSONDecodeError as e:
+                self.log_progress(f"LLM返回的JSON格式错误: {e}", "error")
+                raise LLMError(f"LLM returned invalid JSON: {e}") from e
+            except Exception as e:
+                self.log_progress(f"LLM调用失败: {e}", "error")
+                raise LLMError(f"LLM invocation failed: {e}") from e
 
     def _create_system_prompt(self, prompt_template: str, **kwargs) -> SystemMessage:
         """创建系统提示消息"""

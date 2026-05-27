@@ -22,7 +22,7 @@ _embedding_clients: dict = {}
 def get_llm_client(
     model: str = "gpt-4o",
     temperature: float = 0.7,
-    max_tokens: int = 4000,
+    max_tokens: int = 8000,
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     **kwargs
@@ -107,7 +107,7 @@ async def invoke_llm(
     messages: List[BaseMessage],
     model: str = "gpt-4o",
     temperature: float = 0.7,
-    max_tokens: int = 4000,
+    max_tokens: int = 8000,
     response_format: Optional[str] = None,
     **kwargs
 ) -> str:

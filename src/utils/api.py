@@ -146,17 +146,19 @@ class SemanticScholarAPI:
 
 class ArxivAPI:
     """
-    arXiv API客户端
+    arXiv API客户端（支持HTTPS、超时、重试）
     """
 
-    BASE_URL = "http://export.arxiv.org/api/query"
+    BASE_URL = "https://export.arxiv.org/api/query"
 
-    def __init__(self):
+    def __init__(self, timeout: int = 30, max_retries: int = 1):
         """初始化客户端"""
         self.session: Optional[aiohttp.ClientSession] = None
+        self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self.max_retries = max_retries
 
     async def __aenter__(self):
-        self.session = aiohttp.ClientSession()
+        self.session = aiohttp.ClientSession(timeout=self.timeout)
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -190,108 +192,81 @@ class ArxivAPI:
         params = {
             "search_query": search_query,
             "start": 0,
-            "max_results": max_results,
+            "max_results": min(max_results, 100),
             "sortBy": sort_by,
             "sortOrder": "descending",
         }
 
-        try:
-            async with self.session.get(
-                self.BASE_URL,
-                params=params,
-            ) as response:
-                response.raise_for_status()
-                xml_content = await response.text()
+        import xml.etree.ElementTree as ET
 
-                # 解析XML
-                import xml.etree.ElementTree as ET
-                root = ET.fromstring(xml_content)
+        for attempt in range(self.max_retries + 1):
+            try:
+                async with self.session.get(
+                    self.BASE_URL,
+                    params=params,
+                ) as response:
+                    response.raise_for_status()
+                    xml_content = await response.text()
 
-                # 命名空间
-                ns = {
-                    "atom": "http://www.w3.org/2005/Atom",
-                    "arxiv": "http://arxiv.org/schemas/atom",
-                }
+                    # 解析XML
+                    root = ET.fromstring(xml_content)
 
-                papers = []
-                for entry in root.findall("atom:entry", ns):
-                    paper = {
-                        "id": entry.find("atom:id", ns).text.split("/")[-1],
-                        "title": entry.find("atom:title", ns).text.strip(),
-                        "summary": entry.find("atom:summary", ns).text.strip(),
-                        "published": entry.find("atom:published", ns).text,
-                        "authors": [
-                            author.find("atom:name", ns).text
-                            for author in entry.findall("atom:author", ns)
-                        ],
-                        "categories": [
-                            cat.get("term")
-                            for cat in entry.findall("atom:category", ns)
-                        ],
-                        "url": entry.find("atom:id", ns).text,
-                        "source": "arxiv",
+                    # 命名空间
+                    ns = {
+                        "atom": "http://www.w3.org/2005/Atom",
+                        "arxiv": "http://arxiv.org/schemas/atom",
                     }
 
-                    # 尝试获取PDF链接
-                    link = entry.find("atom:link[@title='pdf']", ns)
-                    if link is not None:
-                        paper["pdf_url"] = link.get("href")
+                    papers = []
+                    for entry in root.findall("atom:entry", ns):
+                        # 跳过错误条目（arXiv API 有时返回错误entry）
+                        title_el = entry.find("atom:title", ns)
+                        if title_el is None:
+                            continue
 
-                    papers.append(paper)
+                        paper = {
+                            "id": entry.find("atom:id", ns).text.split("/")[-1],
+                            "title": title_el.text.strip(),
+                            "summary": (entry.find("atom:summary", ns).text or "").strip(),
+                            "published": entry.find("atom:published", ns).text,
+                            "authors": [
+                                author.find("atom:name", ns).text
+                                for author in entry.findall("atom:author", ns)
+                                if author.find("atom:name", ns) is not None
+                            ],
+                            "categories": [
+                                cat.get("term")
+                                for cat in entry.findall("atom:category", ns)
+                            ],
+                            "url": entry.find("atom:id", ns).text,
+                            "source": "arxiv",
+                        }
 
-                logger.info(f"arXiv API returned {len(papers)} papers")
-                return papers
+                        # 尝试获取PDF链接
+                        link = entry.find("atom:link[@title='pdf']", ns)
+                        if link is not None:
+                            paper["pdf_url"] = link.get("href")
 
-        except (aiohttp.ClientError, Exception) as e:
-            logger.error(f"arXiv API request failed: {e}")
-            logger.error(f"Query was: {search_query}")
-            return []
+                        papers.append(paper)
 
+                    logger.info(f"arXiv API returned {len(papers)} papers")
+                    return papers
 
-async def multi_source_search(
-    queries: List[str],
-    year_range: Optional[tuple] = None,
-    max_results_per_source: int = 100,
-) -> List[Dict[str, Any]]:
-    """
-    多源搜索
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.warning(f"arXiv API attempt {attempt + 1}/{self.max_retries + 1} failed: {e}")
+                if attempt < self.max_retries:
+                    await asyncio.sleep(3.0 * (attempt + 1))
+                else:
+                    logger.error(f"arXiv API all retries exhausted. Query: {search_query}")
+                    return []
+            except ET.ParseError as e:
+                logger.error(f"arXiv XML parse error: {e}")
+                return []
+            except Exception as e:
+                logger.error(f"arXiv API unexpected error: {e}")
+                return []
 
-    Args:
-        queries: 搜索查询列表
-        year_range: 年份范围
-        max_results_per_source: 每个源的最大结果数
-
-    Returns:
-        合并后的论文列表
-    """
-    all_papers = []
-
-    # Semantic Scholar搜索
-    async with SemanticScholarAPI() as s2_client:
-        for query in queries:
-            papers = await s2_client.search_papers(
-                query=query,
-                year_range=year_range,
-                limit=max_results_per_source,
-            )
-            all_papers.extend(papers)
-
-            # 速率限制
-            await asyncio.sleep(0.1)
-
-    # arXiv搜索
-    async with ArxivAPI() as arxiv_client:
-        for query in queries:
-            papers = await arxiv_client.search_papers(
-                query=query,
-                max_results=max_results_per_source,
-            )
-            all_papers.extend(papers)
-
-            await asyncio.sleep(0.1)
-
-    logger.info(f"Multi-source search returned {len(all_papers)} total papers")
-    return all_papers
+        return []
 
 
 def deduplicate_papers(papers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

@@ -51,9 +51,8 @@ dependencies = [
     # Clustering
     "hdbscan>=0.8.0",
 
-    # Visualization (optional)
-    "matplotlib>=3.7.0",
-    "plotly>=5.17.0",
+    # Configuration
+    "pyyaml>=6.0.0",
 
     # Utilities
     "python-dotenv>=1.0.0",
@@ -62,9 +61,9 @@ dependencies = [
     "click>=8.1.0",
     "tqdm>=4.66.0",
 
-    # Async support
-    "asyncio>=3.4.3",
-    "nest-asyncio>=1.5.0",
+    # Web UI
+    "gradio>=5.0.0",
+    "plotly>=5.0.0",
 ]
 
 [project.optional-dependencies]
@@ -95,10 +94,10 @@ lit-review = "src.cli:main"
 research-assistant = "src.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/openclaw-llm/research-assistant"
-Documentation = "https://github.com/openclaw-llm/research-assistant#readme"
-Repository = "https://github.com/openclaw-llm/research-assistant"
-Issues = "https://github.com/openclaw-llm/research-assistant/issues"
+Homepage = "https://github.com/Guming-123/research-assistant"
+Documentation = "https://github.com/Guming-123/research-assistant#readme"
+Repository = "https://github.com/Guming-123/research-assistant"
+Issues = "https://github.com/Guming-123/research-assistant/issues"
 
 [tool.setuptools]
 packages = ["src"]

@@ -200,10 +200,15 @@ class RQManager:
             "level1_trends": "RQ3: What are the research trends and evolution in {topic}?",
             "level2_methods_type": "RQ11: What types of {method_type} methods are used?",
             "level2_methods_comparison": "RQ12: What are the comparative advantages and limitations of different methods?",
+            "level2_principle_comparison": "RQ12b: How do the underlying mathematical principles and core formulas differ between approaches?",
             "level2_apps_domains": "RQ21: In which domains is {topic} applied?",
             "level2_apps_challenges": "RQ22: What are the domain-specific challenges?",
             "level3_technical_detail": "RQ111: What are the technical details of {specific_method}?",
+            "level3_formula": "RQ111b: What are the core mathematical formulations and their derivations in {specific_method}?",
+            "level3_physical_model": "RQ111c: What physical models or theoretical frameworks underlie {specific_method}?",
             "level3_performance": "RQ112: How does {specific_method} perform in terms of {metric}?",
+            "level3_theoretical_limit": "RQ112b: What are the theoretical performance limits derived from first principles, and how close are current methods?",
+            "level3_assumptions": "RQ113: What are the key assumptions and validity boundaries of each method's mathematical model?",
         }
 
     async def initialize_from_topic(
@@ -259,7 +264,7 @@ class RQManager:
 
         rq11 = ResearchQuestion(
             id="RQ11",
-            question="What types of methods are used in this domain?",
+            question=f"What types of methods are used for {research_topic}?",
             level=RQLevel.LEVEL_2,
             description="Categorization of method types",
             keywords=["method type", "category", "class", "family"],
@@ -267,32 +272,41 @@ class RQManager:
 
         rq111 = ResearchQuestion(
             id="RQ111",
-            question="What are the technical details of specific methods?",
+            question=f"What are the core mathematical formulations, derivations, and underlying physical principles of methods for {research_topic}?",
             level=RQLevel.LEVEL_3,
-            description="Deep dive into technical implementation",
-            keywords=["implementation", "architecture", "technical detail"],
+            description="Deep dive into core formulas, derivation chains, and first-principles understanding",
+            keywords=["formula", "derivation", "mathematical model", "physical principle", "equation", "theory"],
         )
 
         rq112 = ResearchQuestion(
             id="RQ112",
-            question="What are the performance characteristics?",
+            question=f"What are the theoretical performance limits of methods for {research_topic} derived from first principles, and how close are current methods to these limits?",
             level=RQLevel.LEVEL_3,
-            description="Performance analysis and metrics",
-            keywords=["performance", "accuracy", "efficiency", "scalability"],
+            description="Theoretical limit analysis and gap assessment from fundamental laws",
+            keywords=["theoretical limit", "bound", "first principles", "physical limit", "performance gap", "fundamental constraint"],
+        )
+
+        rq113 = ResearchQuestion(
+            id="RQ113",
+            question=f"What are the key assumptions, validity boundaries, and failure modes of the mathematical models used in {research_topic}?",
+            level=RQLevel.LEVEL_3,
+            description="Assumption analysis and model validity assessment",
+            keywords=["assumption", "validity", "boundary condition", "failure mode", "model limitation", "approximation"],
         )
 
         rq12 = ResearchQuestion(
             id="RQ12",
-            question="What are the comparative advantages and limitations of different methods?",
+            question=f"How do the underlying mathematical principles and core formulas differ between various approaches to {research_topic}, and what are their comparative advantages and limitations?",
             level=RQLevel.LEVEL_2,
-            description="Comparative analysis of methods",
-            keywords=["advantage", "limitation", "comparison", "trade-off"],
+            description="Comparative analysis at the principle/formula level, not just surface-level comparison",
+            keywords=["principle comparison", "formula difference", "advantage", "limitation", "trade-off", "theoretical basis"],
         )
 
         rq1.add_child(rq11)
         rq1.add_child(rq12)
         rq11.add_child(rq111)
         rq11.add_child(rq112)
+        rq11.add_child(rq113)
 
         rq2 = ResearchQuestion(
             id="RQ2",
@@ -304,7 +318,7 @@ class RQManager:
 
         rq21 = ResearchQuestion(
             id="RQ21",
-            question="In which domains is this research applied?",
+            question=f"In which domains is {research_topic} applied?",
             level=RQLevel.LEVEL_2,
             description="Identification of application domains",
             keywords=["domain", "field", "industry", "sector"],
@@ -312,7 +326,7 @@ class RQManager:
 
         rq22 = ResearchQuestion(
             id="RQ22",
-            question="What are the domain-specific challenges?",
+            question=f"What are the domain-specific challenges for {research_topic}?",
             level=RQLevel.LEVEL_2,
             description="Analysis of challenges in different domains",
             keywords=["challenge", "issue", "problem", "barrier"],
@@ -331,7 +345,7 @@ class RQManager:
 
         rq31 = ResearchQuestion(
             id="RQ31",
-            question="How have methods evolved over time?",
+            question=f"How have methods for {research_topic} evolved over time?",
             level=RQLevel.LEVEL_2,
             description="Temporal evolution analysis",
             keywords=["evolution", "timeline", "progression", "history"],
@@ -339,7 +353,7 @@ class RQManager:
 
         rq32 = ResearchQuestion(
             id="RQ32",
-            question="What are the emerging research directions?",
+            question=f"What are the emerging research directions for {research_topic}?",
             level=RQLevel.LEVEL_2,
             description="Future directions identification",
             keywords=["emerging", "future", "novel", "cutting-edge"],
@@ -477,27 +491,31 @@ Cluster context: {context}
 
 Please structure your response as:
 1. Overview of the domain
-2. Main categories/themes
-3. Cross-cutting trends
-4. Research gaps and opportunities""",
+2. Core mathematical frameworks and theoretical foundations used in this domain
+3. Main categories/themes with their underlying principles (not just names)
+4. Cross-cutting trends and the fundamental reasons driving them
+5. Research gaps and opportunities from a principles perspective""",
             RQLevel.LEVEL_2: """Generate a detailed analysis addressing: {rq}
 
 Cluster context: {context}
 
 Please structure your response as:
 1. Specific items in this category
-2. Comparative analysis (table format)
-3. Technical details
-4. Advantages and limitations""",
+2. Core formulas and derivation paths for each approach (explain each symbol and its physical/mathematical meaning)
+3. Comparative analysis in table format (must include: method | core formula | key parameters | theoretical limit | actual performance gap)
+4. Principle-level differences: WHY do the methods differ in performance? Trace back to their mathematical or physical assumptions
+5. Advantages and limitations explained from the formula/first-principles perspective""",
             RQLevel.LEVEL_3: """Generate an in-depth analysis addressing: {rq}
 
 Cluster context: {context}
 
 Please structure your response as:
-1. Technical implementation details
-2. Performance characteristics with data
-3. Specific advantages and limitations
-4. Applicable scenarios""",
+1. Core formula interpretation: List the key equations, explain EVERY symbol (meaning, dimension, typical range), and state which physical law or mathematical theorem the formula derives from
+2. Derivation chain: Show the complete path from basic assumptions/axioms to the final result, including every intermediate step
+3. Assumptions and validity boundaries: Under what conditions does the formula break down? What happens at the boundary?
+4. Parameter sensitivity analysis: Which parameter has the greatest impact on the output and WHY (explain from the formula structure)
+5. Theoretical limit derivation: Starting from first principles, derive the theoretical upper/lower bound and compare with reported experimental values
+6. Performance characteristics with specific quantitative data""",
         }
 
         template = level_prompts.get(rq.level, level_prompts[RQLevel.LEVEL_2])

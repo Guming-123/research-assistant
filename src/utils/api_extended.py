@@ -482,6 +482,18 @@ class OpenAlexAPI:
 
     BASE_URL = "https://api.openalex.org"
 
+    @staticmethod
+    def _inverted_index_to_text(inverted_index: Optional[Dict[str, List[int]]]) -> str:
+        """将 OpenAlex 的 abstract_inverted_index 还原为文本"""
+        if not inverted_index:
+            return ""
+        word_positions = []
+        for word, positions in inverted_index.items():
+            for pos in positions:
+                word_positions.append((pos, word))
+        word_positions.sort(key=lambda x: x[0])
+        return " ".join(w for _, w in word_positions)
+
     def __init__(self, email: Optional[str] = None):
         """
         初始化客户端
@@ -586,8 +598,10 @@ class OpenAlexAPI:
                             if name:
                                 authors.append({"name": name})
 
-                    # 摘要
-                    # OpenAlex 不直接提供摘要，需要从其他来源获取
+                    # 摘要（从 abstract_inverted_index 还原）
+                    abstract = self._inverted_index_to_text(
+                        item.get("abstract_inverted_index")
+                    )
 
                     # 年份
                     year = item.get("publication_year")
@@ -620,7 +634,7 @@ class OpenAlexAPI:
                         "paperId": item.get("id", "").replace("/", "_"),
                         "id": item.get("id", "").replace("/", "_"),
                         "title": title,
-                        "abstract": "",  # OpenAlex 不提供
+                        "abstract": abstract,
                         "year": year,
                         "authors": authors,
                         "venue": journal,

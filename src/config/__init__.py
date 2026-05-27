@@ -18,9 +18,9 @@ class AgentConfig:
     """Agent配置类"""
     name: str
     description: str = ""
-    model: str = "glm-4-plus"
+    model: str = "glm-4-flash"
     temperature: float = 0.7
-    max_tokens: int = 4000
+    max_tokens: int = 8000
     enable_streaming: bool = False
     timeout: int = 120
     retry_attempts: int = 3
@@ -43,15 +43,15 @@ class ScreenConfig(AgentConfig):
     """Screen Agent配置"""
     chunk_size: int = 512
     chunk_overlap: int = 50
-    default_nf_threshold: float = 0.7
+    default_nf_threshold: float = 0.3
     enable_llm_screening: bool = True
     similarity_threshold: float = 0.5
-    top_k_chunks: int = 10
-    llm_threshold_min: float = 0.5
+    top_k_chunks: int = 50
+    llm_threshold_min: float = 0.2
     llm_threshold_max: float = 0.8
     # 两阶段筛选模型配置
     screening_model: str = "glm-4-flash"  # 初筛模型（快速、低成本）
-    refinement_model: Optional[str] = "glm-4-plus"  # 精确判定模型（可选）
+    refinement_model: Optional[str] = "glm-4-flash"  # 精确判定模型（可选）
 
 
 @dataclass
@@ -87,7 +87,7 @@ class SystemConfig:
     max_checkpoints: int = 10
 
     # LLM配置
-    llm_model: str = "glm-4-plus"
+    llm_model: str = "glm-4-flash"
     llm_temperature: float = 0.7
     llm_max_tokens: int = 4000
     llm_timeout: int = 120
@@ -226,9 +226,9 @@ class ConfigLoader:
             max_checkpoints=workspace.get("max_checkpoints", 10),
 
             # LLM
-            llm_model=llm.get("default_model", "glm-4-plus"),
+            llm_model=llm.get("default_model", "glm-4-flash"),
             llm_temperature=llm.get("default_temperature", 0.7),
-            llm_max_tokens=llm.get("default_max_tokens", 4000),
+            llm_max_tokens=llm.get("default_max_tokens", 8000),
             llm_timeout=llm.get("timeout", 120),
             llm_retry_attempts=llm.get("retry_attempts", 3),
 
@@ -301,7 +301,7 @@ class ConfigLoader:
                 llm_threshold_max=screening_config.get("llm_threshold_max", 0.8),
                 # 模型分层配置
                 screening_model=screening_config.get("screening_model", "glm-4-flash"),
-                refinement_model=screening_config.get("refinement_model", "glm-4-plus"),
+                refinement_model=screening_config.get("refinement_model", "glm-4-flash"),
             )
         elif agent_name == "cluster":
             return ClusterConfig(

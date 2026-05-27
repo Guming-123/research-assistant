@@ -1,45 +1,78 @@
-# Multi-Agent Literature Review System
+# Research Assistant - 多Agent文献综述系统
 
-基于论文《AI-Augmented Literature Reviews: Efficient Clustering and Summarization for Researchers》(IEEE Access, 2025) 设计的智能文献综述系统。
+基于多Agent协作的智能文献综述系统。输入研究主题，系统自动完成文献检索、相关性筛选、语义聚类和综述报告生成，输出聚焦底层原理与量化分析的结构化综述报告。
+
+基于论文 *AI-Augmented Literature Reviews: Efficient Clustering and Summarization for Researchers* (IEEE Access, 2025) 的方法论设计。
 
 ## 系统架构
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Multi-Agent 文献综述系统                       │
-│                                                                 │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐    │
-│  │ Search   │──▶│ Screen   │──▶│ Cluster  │──▶│ Summary  │    │
-│  │ Agent    │   │ Agent    │   │ Agent    │   │ Agent    │    │
-│  └──────────┘   └──────────┘   └──────────┘   └──────────┘    │
-│       │              │              │              │            │
-│       ▼              ▼              ▼              ▼            │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │              Coordinator Agent (协调者)                   │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│       │                                                         │
-│       ▼                                                         │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │              Shared Workspace (共享工作区)                 │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
+用户输入研究主题
+       │
+       ▼
+┌──────────────────────────────────────────────────────┐
+│                 Coordinator 协调者                     │
+│         任务调度 · 状态管理 · 质量门控                  │
+└──────────┬──────────┬──────────┬──────────┬──────────┘
+           │          │          │          │
+           ▼          ▼          ▼          ▼
+     ┌─────────┐┌─────────┐┌─────────┐┌─────────┐
+     │ Search  ││ Screen  ││ Cluster ││ Summary │
+     │ Agent   ││ Agent   ││ Agent   ││ Agent   │
+     └────┬────┘└────┬────┘└────┬────┘└────┬────┘
+          │          │          │          │
+          ▼          ▼          ▼          ▼
+     ┌──────────────────────────────────────────────┐
+     │            Shared Workspace                  │
+     │       文献库 · 聚类 · 摘要 · 嵌入 · 报告     │
+     └──────────────────────────────────────────────┘
 ```
 
-## 核心功能
+## 处理流水线
 
-1. **Search Agent**: 多源文献检索、去重、标准化
-   - **支持的数据库**：arXiv、PubMed、DBLP、Europe PMC、OpenAlex（全部免费）
-   - 无需 API Key，开箱即用
-2. **Screen Agent**: 基于归一化频率(NF)的相关性筛选
-3. **Cluster Agent**: HDBSCAN语义聚类、主题发现
-4. **Summary Agent**: 层级RQ驱动的结构化摘要生成
-5. **Coordinator**: 全局协调、质量门控、状态管理
+| 阶段 | 功能 | 核心技术 |
+|------|------|----------|
+| **Search** | 多数据库检索、去重、元数据标准化 | arXiv, PubMed, DBLP, Europe PMC, OpenAlex |
+| **Screen** | 论文级余弦相似度 + LLM边界判定 | BGE-small-zh嵌入, CUDA矩阵运算, 三级筛选 |
+| **Cluster** | 语义聚类发现研究主题 | GPU-PCA降维 + HDBSCAN, 自适应簇大小 |
+| **Summary** | 层级RQ驱动综述生成 | 两段式LLM调用, 反虚构引用提示词 |
+
+### 各阶段详细说明
+
+**Search Agent** — 多源文献检索
+- 使用LLM自动生成搜索策略，回退到关键词组合
+- 5个学术数据库并行检索（全部免费，无需API Key）
+- 基于标题标准化去重
+
+**Screen Agent** — 相关性筛选
+- 论文级余弦相似度：将所有论文和RQ问题分别嵌入，计算相似度矩阵
+- 三级筛选策略：高分自动通过(≥0.75)、低分自动拒绝(<0.68)、边界区间送LLM判定
+- 全局LLM信号量(5并发)控制速率
+
+**Cluster Agent** — 语义聚类
+- 仅对通过筛选的相关论文进行聚类
+- PCA降维（GPU加速）→ t-SNE/PCA到2D → HDBSCAN聚类
+- 自适应min_cluster_size：论文少时自动调小
+- LLM自动生成簇标签和描述
+
+**Summary Agent** — 综述生成
+- 按簇提取论文内容（含作者、标题、年份）
+- 并行生成各簇的方法论分析和应用分析
+- 两段式LLM生成完整报告（引言+方法论 / 应用+趋势+结论）
+- 始终保存fallback报告，LLM失败时自动降级
+- 强制引用格式 `[作者, 年份, 论文标题]`，禁止虚构论文
 
 ## 安装
 
+### 前置要求
+
+- Python >= 3.10
+- CUDA（可选，GPU加速嵌入计算）
+
+### 安装步骤
+
 ```bash
-# 克隆仓库
-git clone https://github.com/openclaw-llm/research-assistant.git
+git clone https://github.com/Guming-123/research-assistant.git
 cd research_assistant
 
 # 创建虚拟环境
@@ -48,79 +81,88 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 
 # 安装依赖
 pip install -r requirements.txt
+
+# GPU用户（可选，加速嵌入和降维计算）
+pip install -r requirements_gpu.txt
+python setup_gpu.py
 ```
 
 ## 配置
 
-1. 复制环境变量模板：
+### 1. API密钥
+
 ```bash
 cp .env.example .env
 ```
 
-2. 编辑`.env`文件，填入你的API密钥：
-
-### 使用 GLM API (智谱AI) - 推荐
+编辑 `.env`，填入API密钥：
 
 ```bash
-# 获取 API Key: https://open.bigmodel.cn/usercenter/apikeys
-OPENAI_API_KEY=your_glm_api_key_here
+# 智谱AI GLM（默认）
+OPENAI_API_KEY=your_glm_api_key
 OPENAI_BASE_URL=https://open.bigmodel.cn/api/paas/v4/
-OPENAI_MODEL=glm-4-plus
+
+# 或 OpenAI
+# OPENAI_API_KEY=your_openai_api_key
+# OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
-**GLM 模型选择**：
-- `glm-4-flash`: 快速模型，适合大规模调用（成本较低）
-- `glm-4-plus`: 标准模型，适合通用任务
-- `glm-4`: 基础模型
-- `glm-4-long`: 长上下文模型 (128K tokens)
-- `embedding-2` / `embedding-3`: Embedding 模型
+### 2. 嵌入模型
 
-### 使用 OpenAI API
+系统默认使用本地 BGE-small-zh-v1.5 模型（~100MB），用于论文筛选和聚类阶段的文本嵌入，无需远程API调用。
 
 ```bash
-OPENAI_API_KEY=your_openai_api_key_here
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4o
+# .env 中配置（默认值）
+EMBEDDING_MODEL=local-zh          # BGE-small-zh-v1.5, 中文优化, 768维
+# EMBEDDING_MODEL=local           # 多语言, ~470MB
+# EMBEDDING_MODEL=local-en        # 英文优化, ~90MB
+# EMBEDDING_MODEL=embedding-3     # 远程GLM API, 1024维, 按调用收费
+```
+
+首次运行自动从 HuggingFace 下载模型到本地缓存。CUDA可用时自动GPU加速。详见 [LOCAL_MODEL_GUIDE.md](LOCAL_MODEL_GUIDE.md)。
+
+### 3. 系统参数
+
+编辑 `config.yaml` 调整各阶段参数：
+
+```yaml
+# 核心参数说明
+llm:
+  default_max_tokens: 8000    # LLM最大输出token
+
+screening:
+  nf_threshold: 0.68           # 筛选相似度阈值
+
+clustering:
+  min_cluster_size: 20         # HDBSCAN最小簇大小
 ```
 
 ## 使用方法
 
-### 完整流程
+### 完整流程（一键执行）
 
 ```bash
-python main.py --topic "deep learning in computer vision" --full
+python main.py --topic "subthreshold swing reduction in transistors" --full
 ```
 
 ### 单独执行各阶段
 
 ```bash
-# 仅搜索
-python main.py --topic "transformer models" --search --max-results 100
-
-# 仅筛选
+python main.py --topic "deep learning" --search --max-results 100
 python main.py --screen
-
-# 仅聚类
 python main.py --cluster
-
-# 仅生成摘要
 python main.py --summarize
 ```
 
 ### 查看状态
 
 ```bash
-# 查看系统状态
 python main.py --status
-
-# 列出已检索的论文
 python main.py --list-papers
-
-# 列出聚类结果
 python main.py --list-clusters
 ```
 
-## 作为Python模块使用
+### 作为Python模块调用
 
 ```python
 import asyncio
@@ -128,27 +170,20 @@ from src.core import Coordinator, SharedWorkspace, RQManager
 from src.agents import SearchAgent, ScreenAgent, ClusterAgent, SummaryAgent
 
 async def main():
-    # 初始化
     workspace = SharedWorkspace("./workspace")
     rq_manager = RQManager("./workspace")
 
-    # 创建协调者
     coordinator = Coordinator(workspace, rq_manager)
-
-    # 注册Agent
     coordinator.register_agent(SearchAgent(workspace))
     coordinator.register_agent(ScreenAgent(workspace, rq_manager))
     coordinator.register_agent(ClusterAgent(workspace))
     coordinator.register_agent(SummaryAgent(workspace))
 
-    # 执行
     result = await coordinator.run(
         research_topic="deep learning for NLP",
-        year_range=(2018, 2025),
         auto_mode=True,
     )
-
-    print(result)
+    print(f"Report: {result.data}")
 
 asyncio.run(main())
 ```
@@ -157,71 +192,98 @@ asyncio.run(main())
 
 ```
 research_assistant/
+├── main.py                        # 入口
+├── config.yaml                    # 系统配置
+├── .env.example                   # 环境变量模板
+├── requirements.txt               # 核心依赖
+├── requirements_gpu.txt           # GPU加速依赖
 ├── src/
-│   ├── __init__.py
-│   ├── __main__.py
-│   ├── cli.py                 # 命令行界面
-│   ├── core/                  # 核心组件
-│   │   ├── agent.py           # Agent基类
-│   │   ├── coordinator.py     # 协调者
-│   │   ├── workspace.py       # 共享工作区
-│   │   └── rq_manager.py      # RQ管理器
-│   ├── agents/                # 专业Agent
-│   │   ├── search_agent.py
-│   │   ├── screen_agent.py
-│   │   ├── cluster_agent.py
-│   │   └── summary_agent.py
-│   └── utils/                 # 工具模块
-│       ├── llm.py
-│       ├── pdf.py
-│       ├── text.py
-│       ├── embedding.py
-│       └── api.py
-├── main.py                    # 主入口
-├── config.yaml                # 配置文件
-├── requirements.txt           # 依赖
-└── README.md
+│   ├── cli.py                     # 命令行界面
+│   ├── config/
+│   │   └── __init__.py            # 配置加载器 (YAML + 环境变量)
+│   ├── core/
+│   │   ├── agent.py               # BaseAgent基类 (LLM信号量控制)
+│   │   ├── coordinator.py         # 协调者 (流水线编排 + 质量门控)
+│   │   ├── workspace.py           # 共享工作区 (JSON持久化)
+│   │   └── rq_manager.py          # 研究问题层级管理
+│   ├── agents/
+│   │   ├── search_agent.py        # 多源检索 + 去重
+│   │   ├── screen_agent.py        # 余弦相似度 + LLM三级筛选
+│   │   ├── cluster_agent.py       # GPU-PCA + HDBSCAN聚类
+│   │   └── summary_agent.py       # 两段式综述生成
+│   └── utils/
+│       ├── llm.py                 # LLM客户端 (缓存 + 信号量)
+│       ├── embedding.py           # 嵌入 (BGE本地GPU / 远程API)
+│       ├── api.py                 # arXiv, Semantic Scholar
+│       ├── api_extended.py        # PubMed, DBLP, OpenAlex, Europe PMC
+│       ├── pdf.py                 # PDF文本提取
+│       ├── text.py                # 文本分块、关键词提取、NF计算
+│       └── exceptions.py          # 异常层级
+├── tests/                         # 测试套件
+└── workspace/                     # 运行时数据（自动创建）
+    ├── literature/records.json    # 论文数据库
+    ├── clusters/results.json      # 聚类结果
+    ├── embeddings/embeddings.json # 向量缓存
+    └── reports/                   # 生成的综述报告 (.md)
 ```
+
+## 支持的学术数据库
+
+| 数据库 | 领域 | 需要API Key |
+|--------|------|:-----------:|
+| arXiv | 计算机、物理、数学 | 否 |
+| PubMed | 医学、生物学 | 否 |
+| DBLP | 计算机科学 | 否 |
+| Europe PMC | 生命科学、生物医学 | 否 |
+| OpenAlex | 跨学科 | 否 |
+
+> 注意：DBLP和OpenAlex不提供论文摘要，来自这些数据库的论文摘要字段为空。
 
 ## 技术栈
 
-- **LLM框架**: LangChain (支持 GLM API)
-- **向量检索**: FAISS / NumPy fallback
-- **聚类**: HDBSCAN / scikit-learn
-- **PDF处理**: PyMuPDF / PyPDF2
-- **异步IO**: asyncio / aiohttp
+| 组件 | 技术 |
+|------|------|
+| LLM框架 | LangChain + OpenAI兼容接口 |
+| 默认LLM | 智谱AI GLM-4-flash/plus |
+| 文本嵌入 | BGE-small-zh-v1.5 (本地GPU推理) |
+| 降维 | PCA (PyTorch CUDA) |
+| 聚类 | HDBSCAN |
+| 向量索引 | FAISS (GPU > CPU > NumPy回退) |
+| 异步框架 | asyncio + aiohttp |
+| 并发控制 | asyncio.Semaphore(5) |
 
-### 支持的论文数据库（全部免费）
+## 报告质量保障
 
-| 数据库 | 领域 | 说明 |
-|--------|------|------|
-| **arXiv** | 计算机科学、物理、数学 | 预印本论文，更新快 |
-| **PubMed** | 医学、生物学 | 美国国家医学图书馆 |
-| **DBLP** | 计算机科学 | 计算机科学文献数据库 |
-| **Europe PMC** | 生命科学、生物医学 | 欧洲开放获取文献 |
-| **OpenAlex** | 跨学科 | 最大的开放学术引用数据库 |
+系统通过多层提示词工程确保综述质量：
 
-### LLM 提供商支持
+- **反虚构引用**：强制格式 `[作者, 年份, 论文标题]`，禁止引用列表外的论文，附正确/错误示例
+- **反空泛表述**：禁止"取得了较好效果"类空洞评价，必须给出具体指标和数值
+- **深度分析要求**：必须深入物理机制/数学公式层面，而非停留在方法名称罗列
+- **因果追溯**：每个结论必须有底层原理支撑，解释为什么而非仅仅是什么
+- **双重保障**：始终生成fallback报告，LLM失败时自动降级
 
-系统通过 LangChain 的 OpenAI 兼容接口支持多种 LLM 提供商：
+## 运行示例
 
-| 提供商 | 模型示例 | BASE_URL |
-|--------|----------|----------|
-| **智谱AI (GLM)** | glm-4-plus, glm-4-flash | `https://open.bigmodel.cn/api/paas/v4/` |
-| **OpenAI** | gpt-4o, gpt-4o-mini | `https://api.openai.com/v1` |
-| **其他兼容接口** | - | 根据服务商配置 |
+```bash
+# 完整流程
+$ python main.py --topic "methods for reducing subthreshold swing of transistors" --full
 
-## 引用
+# 输出示例:
+# workspace/reports/literature_review_20260515_163000.md         ← LLM综述报告
+# workspace/reports/literature_review_20260515_163000_fallback.md ← 模板报告(备用)
+```
 
-如果本系统对您的研究有帮助，请引用原论文：
+## 测试
 
-```bibtex
-@article{ai_augmented_literature_reviews_2025,
-  title={AI-Augmented Literature Reviews: Efficient Clustering and Summarization for Researchers},
-  journal={IEEE Access},
-  year={2025},
-  note{基于此论文的方法论设计}
-}
+```bash
+# 运行全部测试
+pytest
+
+# 运行单个测试文件
+pytest tests/test_workspace.py -v
+
+# 查看覆盖率
+pytest --cov=src --cov-report=term-missing
 ```
 
 ## 许可证

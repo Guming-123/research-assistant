@@ -1,6 +1,8 @@
 """
 Cluster Agent - 聚类分析Agent
 负责将筛选后的文献按语义相似度自动聚类，发现主题结构
+
+GPU加速支持：优先使用 PyTorch CUDA，不可用时回退到 sklearn/hdbscan
 """
 
 import asyncio
@@ -13,12 +15,41 @@ import numpy as np
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from ..core.agent import BaseAgent, AgentConfig, AgentResult
+from ..core.agent import BaseAgent, AgentConfig, AgentResult, get_agent_model
 from ..core.workspace import LiteratureRecord, ClusterResult, SharedWorkspace
 from ..utils.embedding import get_embeddings, compute_similarity_matrix
 from ..utils.llm import get_llm_client
 
 logger = logging.getLogger(__name__)
+
+# GPU 后端检测（PyTorch CUDA）
+_GPU_BACKEND = "cpu"
+_torch_device = None
+try:
+    import torch
+    if torch.cuda.is_available():
+        _GPU_BACKEND = "torch-cuda"
+        _torch_device = torch.device("cuda")
+        logger.info(f"PyTorch CUDA GPU backend available: {torch.cuda.get_device_name(0)}")
+    else:
+        logger.info("CUDA not available, using CPU backend")
+except ImportError:
+    logger.info("PyTorch not available, using CPU backend")
+
+
+def _gpu_pca(data: np.ndarray, n_components: int) -> np.ndarray:
+    """使用 PyTorch GPU 进行 PCA 降维"""
+    import torch
+
+    t = torch.tensor(data, dtype=torch.float32, device=_torch_device)
+    # 中心化
+    mean = t.mean(dim=0, keepdim=True)
+    t = t - mean
+    # SVD 分解（GPU 加速）
+    U, S, Vh = torch.linalg.svd(t, full_matrices=False)
+    # 取前 n_components 个主成分
+    result = U[:, :n_components] * S[:n_components]
+    return result.cpu().numpy()
 
 
 class ClusterAgent(BaseAgent):
@@ -41,6 +72,8 @@ class ClusterAgent(BaseAgent):
 2. 该簇的核心研究主题描述（2-3句话）
 3. 该簇中的代表性论文（最多3篇）
 4. 子主题列表
+5. 该簇论文共享的核心公式或数学框架（如果可以从摘要中识别）
+6. 该簇方法论在原理层面的共同点（底层物理/数学原理，而非表面方法名）
 
 簇内论文：
 {papers_info}
@@ -52,7 +85,9 @@ class ClusterAgent(BaseAgent):
   "representative_papers": [
     {{"title": "...", "reason": "代表性原因"}}
   ],
-  "sub_themes": ["子主题1", "子主题2"]
+  "sub_themes": ["子主题1", "子主题2"],
+  "shared_formulas": "该簇涉及的核心公式或数学框架描述",
+  "underlying_principles": "该簇论文共享的底层物理/数学原理"
 }}"""
 
     def __init__(
@@ -65,7 +100,7 @@ class ClusterAgent(BaseAgent):
         config = config or AgentConfig(
             name="ClusterAgent",
             description="Clusters papers by semantic similarity",
-            model="glm-4-flash",
+            model=get_agent_model("cluster"),
             temperature=0.5,
         )
         super().__init__(config, workspace, llm_client)
@@ -79,7 +114,7 @@ class ClusterAgent(BaseAgent):
             },
             "clustering": {
                 "method": "hdbscan",
-                "min_cluster_size": 5,
+                "min_cluster_size": 6,
                 "min_samples": 3,
             },
         }
@@ -102,14 +137,25 @@ class ClusterAgent(BaseAgent):
         """
         method = kwargs.get("method", "hdbscan")
         min_cluster_size = kwargs.get("min_cluster_size", 5)
+        research_topic = kwargs.get("research_topic", "")
 
         try:
-            # 获取相关文献
-            papers = await self.workspace.get_literature()
+            # 只获取筛选后的相关文献（relevance_score 不为 None）
+            all_papers = await self.workspace.get_literature()
+            papers = [p for p in all_papers if p.relevance_score is not None]
             if not papers:
                 return self._create_result(
                     success=False,
-                    errors=["No papers in workspace"]
+                    errors=["No relevant papers in workspace"]
+                )
+
+            # 自适应 min_cluster_size：确保能形成簇
+            n_papers = len(papers)
+            if min_cluster_size > n_papers // 3:
+                min_cluster_size = max(2, n_papers // 10)
+                self.log_progress(
+                    f"Adjusted min_cluster_size to {min_cluster_size} "
+                    f"(only {n_papers} papers available)"
                 )
 
             self.log_progress(f"Clustering {len(papers)} papers...")
@@ -117,13 +163,17 @@ class ClusterAgent(BaseAgent):
             # ① 获取embeddings
             self.log_progress("Loading embeddings...")
             embeddings_dict = await self.workspace.get_all_embeddings()
-            self.log_progress(f"Loaded {len(embeddings_dict)} embeddings from workspace")
+            # 只保留当前论文的embedding
+            embeddings_dict = {pid: emb for pid, emb in embeddings_dict.items()
+                               if pid in {p.id for p in papers}}
+            self.log_progress(f"Loaded {len(embeddings_dict)} cached embeddings for current papers")
 
-            if not embeddings_dict:
-                # 如果没有embeddings，生成它们
-                self.log_progress("Generating embeddings...")
+            missing_papers = [p for p in papers if p.id not in embeddings_dict]
+            if missing_papers:
+                # 生成缺失的embeddings
+                self.log_progress(f"Generating embeddings for {len(missing_papers)} papers...")
 
-                texts = [f"{p.title}\n{p.abstract or ''}" for p in papers]
+                texts = [f"{p.title}\n{p.abstract or ''}" for p in missing_papers]
                 self.log_progress(f"Prepared {len(texts)} texts for embedding")
 
                 self.log_progress("Calling get_embeddings...")
@@ -134,15 +184,12 @@ class ClusterAgent(BaseAgent):
                 self.log_progress(f"get_embeddings returned in {elapsed:.2f}s: {len(embeddings)} embeddings")
 
                 self.log_progress("Creating embeddings dictionary...")
-                embeddings_dict = {p.id: emb for p, emb in zip(papers, embeddings)}
-                self.log_progress(f"Dictionary created with {len(embeddings_dict)} entries")
+                new_embeddings = {p.id: emb for p, emb in zip(missing_papers, embeddings)}
+                embeddings_dict.update(new_embeddings)
+                self.log_progress(f"Total embeddings: {len(embeddings_dict)}")
 
-            # 限制处理的论文数量（避免大数据量卡住）
-            max_papers = kwargs.get("max_papers", 500)
-            if len(embeddings_dict) > max_papers:
-                self.log_progress(f"Limiting from {len(embeddings_dict)} to {max_papers} papers")
-                paper_ids = list(embeddings_dict.keys())[:max_papers]
-                embeddings_dict = {pid: embeddings_dict[pid] for pid in paper_ids}
+            # 不限制论文数量，全部参与聚类
+            self.log_progress(f"Clustering all {len(embeddings_dict)} papers")
 
             # 过滤有embedding的论文
             self.log_progress("Filtering papers with embeddings...")
@@ -180,6 +227,11 @@ class ClusterAgent(BaseAgent):
             self.log_progress("Generating cluster labels...")
             labeled_clusters = await self._label_clusters(clusters)
 
+            # ⑤.5 领域一致性过滤：移除与主题明显不相关的簇
+            labeled_clusters = await self._filter_irrelevant_clusters(
+                labeled_clusters, research_topic
+            )
+
             # 保存聚类结果
             await self.workspace.save_clusters(labeled_clusters)
 
@@ -195,11 +247,13 @@ class ClusterAgent(BaseAgent):
                 f"{metrics.get('noise', 0)} noise points"
             )
 
-            # 保存可视化数据
+            # 保存可视化数据（将被过滤掉的簇标记为噪声 -1）
+            filtered_ids = {c.cluster_id for c in labeled_clusters}
+            viz_labels = np.where(np.isin(cluster_labels, list(filtered_ids)), cluster_labels, -1)
             await self._save_visualization_data(
                 valid_papers,
                 reduced_embeddings,
-                cluster_labels,
+                viz_labels,
             )
 
             return self._create_result(
@@ -223,7 +277,7 @@ class ClusterAgent(BaseAgent):
         embeddings: List[List[float]],
     ) -> np.ndarray:
         """
-        降维
+        降维（PCA 优先 GPU，t-SNE 使用 CPU）
 
         Args:
             embeddings: 原始embeddings
@@ -231,46 +285,44 @@ class ClusterAgent(BaseAgent):
         Returns:
             降维后的数组
         """
-        try:
-            from sklearn.manifold import TSNE
-            from sklearn.decomposition import PCA
+        arr = np.array(embeddings, dtype=np.float32)
+        n_samples = len(arr)
 
-            arr = np.array(embeddings)
-            n_samples = len(arr)
+        self.log_progress(f"Starting dimensionality reduction for {n_samples} papers ({_GPU_BACKEND})...")
 
-            self.log_progress(f"Starting dimensionality reduction for {n_samples} papers...")
-
-            # 如果维度太高，先用PCA降到50维
-            if arr.shape[1] > 50:
-                self.log_progress(f"Reducing from {arr.shape[1]} to 50 dimensions using PCA...")
-                pca = PCA(n_components=50, random_state=42)
-                arr = pca.fit_transform(arr)
-                self.log_progress(f"PCA reduction complete")
-
-            # 根据数据量选择降维方法
-            if n_samples > 1000:
-                # 大数据量：直接用PCA降到2维（快速）
-                self.log_progress(f"Large dataset ({n_samples} samples), using PCA for final reduction...")
-                pca_final = PCA(n_components=2, random_state=42)
-                reduced = pca_final.fit_transform(arr)
+        # 论文太少时直接用 PCA，跳过 t-SNE（样本不足会导致 t-SNE 失败）
+        if n_samples < 10:
+            self.log_progress(f"Too few samples ({n_samples}) for t-SNE, using PCA directly...")
+            if _GPU_BACKEND == "torch-cuda":
+                return _gpu_pca(arr, 2)
             else:
-                # 小数据量：用t-SNE
-                self.log_progress(f"Using t-SNE for final reduction ({n_samples} samples)...")
-                tsne = TSNE(
-                    n_components=2,
-                    perplexity=min(30, max(5, n_samples // 10)),
-                    random_state=42,
-                    max_iter=500,  # 减少迭代次数加快速度
-                )
-                reduced = tsne.fit_transform(arr)
+                from sklearn.decomposition import PCA
+                return PCA(n_components=2, random_state=42).fit_transform(arr)
 
-            self.log_progress(f"Dimensionality reduction complete: {reduced.shape[1]} dimensions")
-            return reduced
+        # 第一步：高维 → 50维（PCA，优先 GPU）
+        if arr.shape[1] > 50:
+            if _GPU_BACKEND == "torch-cuda":
+                self.log_progress(f"PCA {arr.shape[1]}→50 (GPU/PyTorch)...")
+                arr = _gpu_pca(arr, 50)
+            else:
+                from sklearn.decomposition import PCA
+                self.log_progress(f"PCA {arr.shape[1]}→50 (CPU/sklearn)...")
+                arr = PCA(n_components=50, random_state=42).fit_transform(arr)
 
-        except ImportError:
-            self.log_progress("scikit-learn not available, using fallback", "warning")
-            # 简单fallback：选择前两个维度
-            return np.array(embeddings)[:, :2]
+        # 第二步：50维 → 2维（统一使用 t-SNE）
+        from sklearn.manifold import TSNE
+        self.log_progress(f"t-SNE 50→2 ({n_samples} samples)...")
+        tsne = TSNE(
+            n_components=2,
+            perplexity=min(30, max(5, n_samples // 10)),
+            random_state=42,
+            max_iter=500,
+        )
+        reduced = tsne.fit_transform(arr)
+
+        reduced = np.array(reduced, dtype=np.float64)
+        self.log_progress(f"Dimensionality reduction complete: {reduced.shape[1]} dimensions ({_GPU_BACKEND})")
+        return reduced
 
     async def _perform_clustering(
         self,
@@ -279,7 +331,7 @@ class ClusterAgent(BaseAgent):
         min_cluster_size: int = 5,
     ) -> np.ndarray:
         """
-        执行聚类
+        执行聚类（hdbscan CPU，HDBSCAN 无 GPU 替代方案）
 
         Args:
             embeddings: 降维后的embeddings
@@ -289,39 +341,38 @@ class ClusterAgent(BaseAgent):
         Returns:
             聚类标签数组
         """
+        data = np.array(embeddings, dtype=np.float32)
+
         try:
             import hdbscan
 
+            self.log_progress("Using hdbscan (CPU)...")
             clusterer = hdbscan.HDBSCAN(
                 min_cluster_size=min_cluster_size,
                 min_samples=3,
                 metric='euclidean',
                 cluster_selection_method='eom',
             )
-            labels = clusterer.fit_predict(embeddings)
+            labels = clusterer.fit_predict(data)
 
             self.log_progress(f"HDBSCAN found {len(set(labels)) - (1 if -1 in labels else 0)} clusters")
             return labels
 
         except ImportError:
             self.log_progress("HDBSCAN not available, using KMeans fallback", "warning")
-            # KMeans fallback
             try:
                 from sklearn.cluster import KMeans
 
-                # 估计簇数
-                n_clusters = max(3, len(embeddings) // min_cluster_size)
-
+                n_clusters = max(3, len(data) // min_cluster_size)
                 kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-                labels = kmeans.fit_predict(embeddings)
+                labels = kmeans.fit_predict(data)
 
                 self.log_progress(f"KMeans found {n_clusters} clusters")
                 return labels
 
             except ImportError:
-                # 最简单的fallback：基于距离的简单聚类
                 self.log_progress("No clustering library available, using simple distance-based clustering", "warning")
-                return self._simple_clustering(embeddings, min_cluster_size)
+                return self._simple_clustering(data, min_cluster_size)
 
     def _simple_clustering(
         self,
@@ -405,7 +456,7 @@ class ClusterAgent(BaseAgent):
         results = []
         for label, data in clusters.items():
             results.append(ClusterResult(
-                cluster_id=label,
+                cluster_id=int(label),
                 label="",  # 将在labeling步骤填充
                 description="",  # 将在labeling步骤填充
                 paper_ids=data["paper_ids"],
@@ -417,12 +468,65 @@ class ClusterAgent(BaseAgent):
         self.log_progress(f"Generated {len(results)} clusters, {noise_count} noise points")
         return results
 
+    async def _filter_irrelevant_clusters(
+        self,
+        clusters: List[ClusterResult],
+        research_topic: str,
+    ) -> List[ClusterResult]:
+        """
+        过滤与主题明显不相关的簇。
+
+        对每个簇，检查其代表性论文标题是否与研究主题相关。
+        如果簇内超过半数论文的标题中不包含主题核心词，则移除该簇。
+        """
+        if not research_topic or not clusters:
+            return clusters
+
+        # 提取主题核心词（去除停用词）
+        stop_words = {"of", "the", "a", "an", "in", "for", "and", "or", "to",
+                       "with", "on", "by", "from", "at", "is", "are", "was", "were"}
+        topic_words = set(w.lower() for w in research_topic.split()
+                          if w.lower() not in stop_words and len(w) > 2)
+
+        filtered = []
+        for cluster in clusters:
+            papers = await self.workspace.get_cluster_papers(cluster.cluster_id)
+            if not papers:
+                filtered.append(cluster)
+                continue
+
+            relevant_count = 0
+            for paper in papers:
+                title_words = set(w.lower() for w in paper.title.split()
+                                  if len(w) > 2)
+                # 检查标题是否与主题有交集
+                if topic_words & title_words:
+                    relevant_count += 1
+
+            ratio = relevant_count / len(papers)
+            if ratio >= 0.3:
+                filtered.append(cluster)
+            else:
+                self.log_progress(
+                    f"Filtered out cluster {cluster.cluster_id} '{cluster.label}': "
+                    f"only {relevant_count}/{len(papers)} papers match topic keywords",
+                    "warning",
+                )
+
+        if len(filtered) < len(clusters):
+            self.log_progress(
+                f"Filtered {len(clusters) - len(filtered)} irrelevant clusters, "
+                f"keeping {len(filtered)}"
+            )
+
+        return filtered
+
     async def _label_clusters(
         self,
         clusters: List[ClusterResult],
     ) -> List[ClusterResult]:
         """
-        为簇生成标签
+        为簇生成标签（并行）
 
         Args:
             clusters: 簇列表
@@ -430,39 +534,32 @@ class ClusterAgent(BaseAgent):
         Returns:
             带标签的簇列表
         """
-        for cluster in clusters:
+        async def _label_one(cluster: ClusterResult) -> None:
             try:
-                # 获取簇内论文
                 papers = await self.workspace.get_literature(paper_ids=cluster.paper_ids)
-
-                # 准备论文信息
                 papers_info = "\n".join([
                     f"- {p.title} (Year: {p.year})"
-                    for p in papers[:20]  # 限制数量避免token超限
+                    for p in papers[:20]
                 ])
-
-                # 调用LLM生成标签
                 messages = [
                     SystemMessage(content="You are an expert in research paper classification."),
                     HumanMessage(
                         content=self.CLUSTER_LABELING_PROMPT.format(papers_info=papers_info)
                     ),
                 ]
-
                 response = await self._call_llm(messages, response_format="json")
                 result = json.loads(response)
-
-                # 更新簇信息
                 cluster.label = result.get("cluster_label", f"Cluster {cluster.cluster_id}")
                 cluster.description = result.get("core_theme", "")
                 cluster.representative_papers = result.get("representative_papers", [])
                 cluster.sub_themes = result.get("sub_themes", [])
-
             except Exception as e:
                 self.log_progress(f"Failed to label cluster {cluster.cluster_id}: {e}", "warning")
                 cluster.label = f"Cluster {cluster.cluster_id}"
                 cluster.description = f"A cluster of {cluster.size} papers on related topics"
 
+        self.log_progress(f"Labeling {len(clusters)} clusters in parallel...")
+        await asyncio.gather(*[_label_one(c) for c in clusters])
         return clusters
 
     async def _evaluate_clustering(
@@ -487,9 +584,13 @@ class ClusterAgent(BaseAgent):
         try:
             from sklearn.metrics import silhouette_score, davies_bouldin_score
 
-            # 轮廓系数
-            if len(set(labels)) > 1 and -1 not in labels:
-                silhouette = silhouette_score(reduced_embeddings, labels)
+            # 轮廓系数（过滤噪声点后计算）
+            non_noise_mask = labels != -1
+            non_noise_labels = labels[non_noise_mask]
+            if len(set(non_noise_labels)) > 1:
+                silhouette = silhouette_score(
+                    reduced_embeddings[non_noise_mask], non_noise_labels
+                )
                 metrics["silhouette_score"] = float(silhouette)
             else:
                 metrics["silhouette_score"] = 0.0

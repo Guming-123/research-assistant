@@ -13,7 +13,7 @@ import logging
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from ..core.agent import BaseAgent, AgentConfig, AgentResult
+from ..core.agent import BaseAgent, AgentConfig, AgentResult, get_agent_model
 from ..core.workspace import LiteratureRecord, SharedWorkspace
 from ..utils.api import ArxivAPI, deduplicate_papers
 from ..utils.api_extended import (
@@ -48,19 +48,31 @@ class SearchAgent(BaseAgent):
 
 研究主题：{research_topic}
 范围定义：{scope_description}
-目标数据库：Semantic Scholar, arXiv
+目标数据库：arXiv, PubMed, DBLP, Europe PMC, OpenAlex
+
+【查询格式要求 - 不同数据库使用不同语法】
+- 所有数据库：只使用简单的关键词组合，用空格分隔，不要使用SQL/布尔语法（不要用AND/OR/NOT/in title等）
+- 用引号包裹需要精确匹配的短语（如 "subthreshold swing"）
+- 每条查询控制在3-5个关键词以内
+- 如果主题中存在歧义词，通过添加领域限定词来缩小范围（如搜索 "subthreshold swing transistor" 而非 "swing"）
+- 不要在查询中加入排除词，通过精确的正面关键词来限定范围
+
+【查询设计原则】
+1. 每条查询必须是简洁的关键词组合，如："subthreshold swing MOSFET" 或 "deep learning image classification"
+2. 生成8-10条不同角度的查询，覆盖主题的不同方面
+3. 优先使用精确的技术术语组合
 
 请输出JSON格式：
 {{
   "search_queries": [
     {{
-      "database": "数据库名",
-      "query": "搜索查询字符串",
+      "query": "简洁的关键词组合",
       "description": "查询说明"
     }}
   ],
   "expected_coverage": "预估覆盖范围说明",
-  "keywords": ["关键词1", "关键词2", ...]
+  "keywords": ["关键词1", "关键词2", ...],
+  "exclusion_terms": ["应排除的歧义词1", "歧义词2"]
 }}"""
 
     def __init__(
@@ -73,7 +85,7 @@ class SearchAgent(BaseAgent):
         config = config or AgentConfig(
             name="SearchAgent",
             description="Searches and retrieves literature from academic databases",
-            model="glm-4-flash",
+            model=get_agent_model("search"),
             temperature=0.3,
         )
         super().__init__(config, workspace, llm_client)
@@ -195,31 +207,48 @@ class SearchAgent(BaseAgent):
             return self._default_search_queries(research_topic)
 
     def _default_search_queries(self, research_topic: str) -> List[Dict[str, str]]:
-        """默认搜索查询策略（使用多数据库）"""
-        # 提取关键词
+        """默认搜索查询策略（使用多数据库），生成 8-10 条查询"""
         keywords = research_topic.split()
 
         queries = []
 
-        # 主要查询 - 使用多个数据库
+        # 完整主题查询
         queries.append({
             "database": "multi",
             "query": research_topic,
-            "description": "Multi-database search",
+            "description": "Full topic search",
             "databases": ["arxiv", "pubmed", "openalex"],
         })
 
-        # 关键词组合查询
+        # 关键词两两组合
         if len(keywords) > 1:
-            # 只取前 2 个关键词组合
-            for i in range(min(2, len(keywords) - 1)):
+            for i in range(min(len(keywords) - 1, 6)):
                 query = f"{keywords[i]} {keywords[i + 1]}"
                 queries.append({
                     "database": "multi",
                     "query": query,
-                    "description": f"Keyword combination: {query}",
+                    "description": f"Keyword pair: {query}",
                     "databases": ["arxiv", "dblp", "openalex"],
                 })
+
+        # 三词组合
+        if len(keywords) > 2:
+            for i in range(min(len(keywords) - 2, 3)):
+                query = f"{keywords[i]} {keywords[i + 1]} {keywords[i + 2]}"
+                queries.append({
+                    "database": "multi",
+                    "query": query,
+                    "description": f"Keyword triplet: {query}",
+                    "databases": ["dblp", "openalex"],
+                })
+
+        # 补充 review/survey 查询
+        queries.append({
+            "database": "multi",
+            "query": f"{research_topic} review survey",
+            "description": "Review and survey papers",
+            "databases": ["openalex"],
+        })
 
         return queries
 
@@ -245,14 +274,16 @@ class SearchAgent(BaseAgent):
 
         self.log_progress(f"Executing {len(queries)} search queries ({results_per_query} papers each)...")
 
+        arxiv_rate_limited = False
+
         for query_info in queries:
             query = query_info["query"]
             databases = query_info.get("databases", ["arxiv", "openalex"])
 
             self.log_progress(f"Query: '{query}' from {len(databases)} databases")
 
-            # arXiv
-            if "arxiv" in databases:
+            # arXiv（被限速后跳过）
+            if "arxiv" in databases and not arxiv_rate_limited:
                 try:
                     self.log_progress(f"  → arXiv: {query}")
                     async with ArxivAPI() as api:
@@ -260,11 +291,18 @@ class SearchAgent(BaseAgent):
                             query=query,
                             max_results=results_per_query,
                         )
-                        all_papers.extend(papers)
-                        self.log_progress(f"  ✓ arXiv: {len(papers)} papers")
-                        await asyncio.sleep(0.5)
+                        if not papers:
+                            arxiv_rate_limited = True
+                            self.log_progress(f"  ⚠ arXiv returned 0 papers, skipping remaining arXiv queries", "warning")
+                        else:
+                            all_papers.extend(papers)
+                            self.log_progress(f"  ✓ arXiv: {len(papers)} papers")
+                        await asyncio.sleep(3.0)
                 except Exception as e:
+                    arxiv_rate_limited = True
                     self.log_progress(f"  ✗ arXiv failed: {e}", "warning")
+            elif "arxiv" in databases and arxiv_rate_limited:
+                self.log_progress(f"  ⊘ arXiv skipped (rate limited)")
 
             # PubMed
             if "pubmed" in databases:
