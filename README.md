@@ -1,6 +1,6 @@
 # Research Assistant - 多Agent文献综述系统
 
-基于多Agent协作的智能文献综述系统。输入研究主题，系统自动完成文献检索、相关性筛选、语义聚类和综述报告生成，输出聚焦底层原理与量化分析的结构化综述报告。
+基于多Agent协作的智能文献综述系统。输入研究主题，系统自动完成文献检索、相关性筛选、语义聚类和综述报告生成，输出聚焦**底层原理、公式推导与量化分析**的结构化综述报告。
 
 基于论文 *AI-Augmented Literature Reviews: Efficient Clustering and Summarization for Researchers* (IEEE Access, 2025) 的方法论设计。
 
@@ -46,18 +46,18 @@
 
 **Screen Agent** — 相关性筛选
 - 论文级余弦相似度：将所有论文和RQ问题分别嵌入，计算相似度矩阵
-- 三级筛选策略：高分自动通过(≥0.75)、低分自动拒绝(<0.68)、边界区间送LLM判定
+- 三级筛选策略：高分自动通过、低分自动拒绝、边界区间送LLM判定
 - 全局LLM信号量(5并发)控制速率
 
 **Cluster Agent** — 语义聚类
 - 仅对通过筛选的相关论文进行聚类
 - PCA降维（GPU加速）→ t-SNE/PCA到2D → HDBSCAN聚类
 - 自适应min_cluster_size：论文少时自动调小
-- LLM自动生成簇标签和描述
+- LLM自动生成簇标签、描述和底层原理共同点
 
 **Summary Agent** — 综述生成
-- 按簇提取论文内容（含作者、标题、年份）
-- 并行生成各簇的方法论分析和应用分析
+- 按簇提取论文内容（含作者、标题、年份、摘要）
+- 并行生成各簇的方法论分析（公式+推导）和应用分析
 - 两段式LLM生成完整报告（引言+方法论 / 应用+趋势+结论）
 - 始终保存fallback报告，LLM失败时自动降级
 - 强制引用格式 `[作者, 年份, 论文标题]`，禁止虚构论文
@@ -67,7 +67,7 @@
 ### 前置要求
 
 - Python >= 3.10
-- CUDA（可选，GPU加速嵌入计算）
+- CUDA（可选，GPU加速嵌入计算和PCA降维）
 
 ### 安装步骤
 
@@ -81,6 +81,9 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 
 # 安装依赖
 pip install -r requirements.txt
+
+# 或使用 pyproject.toml 安装（开发模式）
+pip install -e .
 
 # GPU用户（可选，加速嵌入和降维计算）
 pip install -r requirements_gpu.txt
@@ -139,13 +142,29 @@ clustering:
 
 ## 使用方法
 
-### 完整流程（一键执行）
+### Web UI（推荐）
+
+```bash
+python run_web.py
+```
+
+浏览器打开 `http://localhost:7860`，提供可视化界面：
+
+| Tab | 功能 |
+|-----|------|
+| New Review | 输入研究主题，执行完整流水线，实时进度 |
+| Literature Library | 浏览和筛选已检索的论文 |
+| Clustering Visualization | 2D散点图展示论文聚类 |
+| Review Reports | 查看生成的综述报告 |
+| System Status | 工作空间统计信息和RQ树 |
+
+### CLI 完整流程
 
 ```bash
 python main.py --topic "subthreshold swing reduction in transistors" --full
 ```
 
-### 单独执行各阶段
+### CLI 单独执行各阶段
 
 ```bash
 python main.py --topic "deep learning" --search --max-results 100
@@ -154,7 +173,7 @@ python main.py --cluster
 python main.py --summarize
 ```
 
-### 查看状态
+### CLI 查看状态
 
 ```bash
 python main.py --status
@@ -192,11 +211,16 @@ asyncio.run(main())
 
 ```
 research_assistant/
-├── main.py                        # 入口
+├── main.py                        # CLI入口
+├── run_web.py                     # Web UI入口 (Gradio)
 ├── config.yaml                    # 系统配置
 ├── .env.example                   # 环境变量模板
+├── pyproject.toml                 # 项目元数据与依赖
 ├── requirements.txt               # 核心依赖
 ├── requirements_gpu.txt           # GPU加速依赖
+├── setup_gpu.py                   # GPU环境配置脚本
+├── LOCAL_MODEL_GUIDE.md           # 本地嵌入模型指南
+├── PROJECT_REPORT.md              # 项目技术报告
 ├── src/
 │   ├── cli.py                     # 命令行界面
 │   ├── config/
@@ -211,14 +235,18 @@ research_assistant/
 │   │   ├── screen_agent.py        # 余弦相似度 + LLM三级筛选
 │   │   ├── cluster_agent.py       # GPU-PCA + HDBSCAN聚类
 │   │   └── summary_agent.py       # 两段式综述生成
-│   └── utils/
-│       ├── llm.py                 # LLM客户端 (缓存 + 信号量)
-│       ├── embedding.py           # 嵌入 (BGE本地GPU / 远程API)
-│       ├── api.py                 # arXiv, Semantic Scholar
-│       ├── api_extended.py        # PubMed, DBLP, OpenAlex, Europe PMC
-│       ├── pdf.py                 # PDF文本提取
-│       ├── text.py                # 文本分块、关键词提取、NF计算
-│       └── exceptions.py          # 异常层级
+│   ├── utils/
+│   │   ├── llm.py                 # LLM客户端 (缓存 + 信号量)
+│   │   ├── embedding.py           # 嵌入 (BGE本地GPU / 远程API)
+│   │   ├── api.py                 # arXiv, Semantic Scholar
+│   │   ├── api_extended.py        # PubMed, DBLP, OpenAlex, Europe PMC
+│   │   ├── pdf.py                 # PDF文本提取
+│   │   ├── text.py                # 文本分块、关键词提取、NF计算
+│   │   └── exceptions.py          # 异常层级
+│   └── web_ui/
+│       ├── app.py                 # Gradio应用定义 (5个Tab)
+│       ├── handlers.py            # 异步处理函数
+│       └── views.py               # 数据格式化与可视化
 ├── tests/                         # 测试套件
 └── workspace/                     # 运行时数据（自动创建）
     ├── literature/records.json    # 论文数据库
@@ -249,17 +277,20 @@ research_assistant/
 | 降维 | PCA (PyTorch CUDA) |
 | 聚类 | HDBSCAN |
 | 向量索引 | FAISS (GPU > CPU > NumPy回退) |
+| Web UI | Gradio |
 | 异步框架 | asyncio + aiohttp |
 | 并发控制 | asyncio.Semaphore(5) |
 
 ## 报告质量保障
 
-系统通过多层提示词工程确保综述质量：
+系统通过多层提示词工程确保综述质量，强制聚焦底层原理和公式推导：
 
+- **强制公式解读**：每个方法必须列出核心公式，逐符号解释含义、量纲和典型取值范围，并说明公式的推导来源（哪个物理定律或数学定理）
+- **推导链条要求**：从基本假设到最终结果的完整推导路径，识别关键近似步骤
+- **理论极限推导**：从第一性原理（热力学、量子力学、信息论等）推导理论上限，并与实验值对比
+- **原理层级对比**：方法间的对比必须在公式层面解释差异（哪个公式项导致了性能差异），禁止"A优于B"无理由表述
 - **反虚构引用**：强制格式 `[作者, 年份, 论文标题]`，禁止引用列表外的论文，附正确/错误示例
-- **反空泛表述**：禁止"取得了较好效果"类空洞评价，必须给出具体指标和数值
-- **深度分析要求**：必须深入物理机制/数学公式层面，而非停留在方法名称罗列
-- **因果追溯**：每个结论必须有底层原理支撑，解释为什么而非仅仅是什么
+- **反空泛表述**：禁止"取得了较好效果"、"有广阔前景"类空洞评价，必须给出具体指标和数值
 - **双重保障**：始终生成fallback报告，LLM失败时自动降级
 
 ## 运行示例
@@ -269,8 +300,8 @@ research_assistant/
 $ python main.py --topic "methods for reducing subthreshold swing of transistors" --full
 
 # 输出示例:
-# workspace/reports/literature_review_20260515_163000.md         ← LLM综述报告
-# workspace/reports/literature_review_20260515_163000_fallback.md ← 模板报告(备用)
+# workspace/reports/literature_review_20260515_163000.md         <- LLM综述报告
+# workspace/reports/literature_review_20260515_163000_fallback.md <- 模板报告(备用)
 ```
 
 ## 测试
