@@ -33,7 +33,9 @@ def main():
         share=False,
         theme=gr.themes.Soft(),
         css=".gradio-container { max-width: 1200px; margin: auto; } .progress-log textarea { font-family: monospace; font-size: 0.85em; }",
+        max_file_size="50mb",
     )
+    app.queue(max_size=20)
 
 
 if __name__ == "__main__":

@@ -468,7 +468,9 @@ For each field's main challenge:
         lang_constraint: str = "",
     ) -> str:
         """
-        生成最终综述报告（拆分为两次LLM调用以突破4096 token限制）
+        生成最终综述报告（拆分为四次LLM调用，避免单次输出被截断）
+
+        每次调用只负责一个章节，大幅降低单次输出 token 量。
 
         Args:
             rq_tree: RQ树
@@ -495,49 +497,75 @@ For each field's main challenge:
         total_papers = sum(len(data["papers"]) for data in cluster_data.values())
         topic = rq_tree.research_topic
 
-        # 第一次调用：引言 + 方法论综述
-        part1_prompt = f"""{lang_constraint}
-
-You are a senior academic literature review expert with deep expertise in mathematical modeling and first-principles analysis.
-Your core principle: **Focus on underlying formulas, physical mechanisms, and mathematical derivations. Reject vague overviews.**
-
-Please write the first half of the literature review report.
-
-Research Topic: {topic}
-Review Period: {year_range}
-Total Papers Analyzed: {total_papers}
-Number of Topic Clusters: {len(cluster_summaries)}
-
-Cluster Analysis Summaries:
-{cluster_summaries_text}
-
-【Writing Rules - ZERO TOLERANCE for violations】
+        # ──── 公共写作规则 ────
+        _WRITING_RULES = """【Writing Rules - ZERO TOLERANCE for violations】
 - Every method MUST be accompanied by its core formula with EVERY symbol explained (meaning, dimension, typical range)
-- "This method achieved good results" without specific metric values is FORBIDDEN. You must specify: what metric, improved from X to Y, and the FORMULA-LEVEL reason
-- Must go deep into mathematical formulas / physical models / derivation chains, NOT stay at method name listings
+- "This method achieved good results" without specific metric values is FORBIDDEN
 - Every technical conclusion must be traceable to a specific formula, equation, or physical law
 - Do not start with cliches like "In recent years" or "With the development of XX"
-- No assertions without specific paper citations
 - Do not reduce technical principles to a single sentence like "utilizes XX technology" — explain the FORMULA
-- Do not omit any topic cluster
 - Do not fabricate citations. All citations must come from real papers listed in the cluster summaries above
-- Do not cite papers not appearing in the summaries above
 
 【Citation Format - Must Strictly Follow】
 Correct: Zhang et al. proposed a new method [Zhang, 2023, A Novel Method for XX]
 Correct: This method was first proposed in [Li, 2021, Deep Learning Based Optimization]
 Wrong: [Zhang, 2023] ← missing title, not allowed
 Wrong: [1] ← missing author, year, and title, not allowed
+Do NOT cite papers not listed in the cluster summaries above."""
 
-# Literature Review: {topic}
+        # ──────────────────────────────────────────────
+        # Part 1: 引言（输入完整摘要作为上下文，输出只需引言）
+        # ──────────────────────────────────────────────
+        part1_prompt = f"""{lang_constraint}
+
+You are a senior academic literature review expert with deep expertise in mathematical modeling and first-principles analysis.
+
+Research Topic: {topic}
+Review Period: {year_range}
+Total Papers Analyzed: {total_papers}
+Number of Topic Clusters: {len(cluster_summaries)}
+
+Cluster Analysis Summaries (for context only — do NOT repeat these summaries, write original prose):
+{cluster_summaries_text}
+
+{_WRITING_RULES}
+
+Please write ONLY Section 1 of the literature review:
 
 ## 1. Introduction
 ### 1.1 Research Background and Core Challenges
 (Point out the most fundamental physical/technical bottlenecks, explain WHY this problem is inherently difficult from a physics/math perspective — which fundamental law or equation creates the constraint?)
 ### 1.2 Scope of Review and Methodology
+(Describe the systematic review methodology, data sources, number of papers analyzed, and clustering approach)
+
+Write concisely — this section should be about 500-800 words. Do NOT write any other sections."""
+
+        self.log_progress("Generating report part 1/4: Introduction...")
+        messages_1 = [
+            SystemMessage(content="You are a senior academic literature review expert."),
+            HumanMessage(content=part1_prompt),
+        ]
+        part1 = await self._call_llm(messages_1)
+
+        # ──────────────────────────────────────────────
+        # Part 2: 核心技术原理（每个簇的方法论 + 公式）
+        # ──────────────────────────────────────────────
+        part2_prompt = f"""{lang_constraint}
+
+You are a senior academic literature review expert with deep expertise in mathematical modeling and first-principles analysis.
+Your core principle: **Focus ONLY on underlying principles, core formulas, and mathematical derivations.**
+
+Research Topic: {topic}
+Number of Topic Clusters: {len(cluster_summaries)}
+
+Cluster Analysis Summaries:
+{cluster_summaries_text}
+
+{_WRITING_RULES}
+
+Please write ONLY Section 2 of the literature review. Write a subsection (### 2.x Title) for EACH of the {len(cluster_summaries)} topic clusters.
 
 ## 2. Core Technology Principles
-Write a subsection (### 2.x Title) for EACH of the {len(cluster_summaries)} topic clusters. Each subsection MUST include ALL of the following:
 
 ### 2.x [Cluster Theme]
 #### 2.x.1 Core Formulas and Derivation
@@ -557,27 +585,25 @@ Write a subsection (### 2.x Title) for EACH of the {len(cluster_summaries)} topi
 - What new constraint did this create?
 
 #### 2.x.4 Quantitative Comparison
-| Method | Core Formula | Key Parameters | Metric Value ( Reported ) | Theoretical Limit (Derived) | Gap |
-|--------|-------------|----------------|--------------------------|----------------------------|-----|
+| Method | Core Formula | Key Parameters | Metric Value (Reported) | Theoretical Limit (Derived) | Gap |
+|--------|-------------|----------------|------------------------|----------------------------|-----|
 
-- Citation support using [First Author Last Name, Year, Paper Title] format
+Note: You MUST cover ALL {len(cluster_summaries)} topic clusters. Do not write any other sections."""
 
-Note: You MUST cover ALL {len(cluster_summaries)} topic clusters with the above structure. Do not be vague — write as if explaining the principles and formulas to a peer expert."""
-
-        self.log_progress("Generating report part 1: Introduction + Methodology...")
-        messages_1 = [
+        self.log_progress("Generating report part 2/4: Core Technology Principles...")
+        messages_2 = [
             SystemMessage(content="You are a senior academic literature review expert."),
-            HumanMessage(content=part1_prompt),
+            HumanMessage(content=part2_prompt),
         ]
-        part1 = await self._call_llm(messages_1)
+        part2 = await self._call_llm(messages_2)
 
-        # 第二次调用：应用 + 趋势 + 结论
-        part2_prompt = f"""{lang_constraint}
+        # ──────────────────────────────────────────────
+        # Part 3: 应用场景 + 技术演进
+        # ──────────────────────────────────────────────
+        part3_prompt = f"""{lang_constraint}
 
 You are a senior academic literature review expert with deep expertise in mathematical modeling and first-principles analysis.
-Core principle: **Focus on underlying formulas, physical mechanisms, and mathematical derivations. Reject vague prospects.**
-
-Please write the second half of the literature review report.
+Core principle: **Focus on underlying formulas, physical mechanisms, and mathematical derivations.**
 
 Research Topic: {topic}
 Review Period: {year_range}
@@ -586,24 +612,9 @@ Total Papers Analyzed: {total_papers}
 Cluster Analysis Summaries:
 {cluster_summaries_text}
 
-【Writing Rules - ZERO TOLERANCE for violations】
-- When discussing "trends", identify the FORMULA-LEVEL reason driving the trend (which term in which equation changed, and why), not just "more papers are adopting X"
-- When discussing "limitations", specify exactly which term in which formula creates the limitation, and whether it is a fundamental physical law or an engineering approximation
-- When discussing "future directions", derive feasibility from first principles (show that the physics allows it), not just guess
-- When discussing "evolution", show the FORMULA EVOLUTION: how did the core equation change from generation to generation?
-- Do not simply describe trends as "increasingly many papers adopt X"
-- Do not write "limitations" as just "high cost" or "low efficiency" — specify which formula term, and whether physical vs. process limitation
-- Do not write "future directions" as a wish list — each direction must have first-principles feasibility justification with formula support
-- Do not write conclusions as "This paper reviewed XX" cliches — must include core formula-level findings and quantitative conclusions
-- Do not fabricate citations. All [Author, Year] must be real papers from the clusters
-- All citations must use [First Author Last Name, Year, Paper Title] format from papers in the summaries above
-- Do not cite papers not appearing in the summaries
+{_WRITING_RULES}
 
-【Citation Format - Must Strictly Follow】
-Correct: Zhang et al. proposed a new method [Zhang, 2023, A Novel Method for XX]
-Correct: This method was first proposed in [Li, 2021, Deep Learning Based Optimization]
-Wrong: [Zhang, 2023] ← missing title, not allowed
-Wrong: [1] ← missing author, year, and title, not allowed
+Please write ONLY Sections 3 and 4 of the literature review:
 
 ## 3. Technical Performance in Practice
 Categorize by application scenario. Each scenario MUST include:
@@ -622,17 +633,43 @@ For each generational transition:
 - Show the quantitative impact of the formula change on performance
 
 ### 4.2 Theoretical Limit Analysis from First Principles
-- Starting from fundamental physical laws (e.g., thermodynamics, quantum mechanics, information theory), derive the theoretical performance upper/lower bound
+- Starting from fundamental physical laws, derive the theoretical performance upper/lower bound
 - Write out the derivation chain: fundamental law → intermediate equations → practical limit
 - Compare the theoretical limit with the best reported experimental value
-- Identify which step in the derivation introduces the largest gap (approximation loss)
+- Identify which step introduces the largest gap (approximation loss)
 - Is the remaining gap due to the physics (irreducible) or engineering (potentially improvable)?
 
 ### 4.3 Cross-domain Principle Transfer Feasibility
 When importing methods from other domains:
 - Compare the core formulas: are the mathematical structures compatible?
-- List the specific conditions (parameter ranges, assumptions) that must be satisfied for transfer validity
+- List the specific conditions (parameter ranges, assumptions) for transfer validity
 - What formula modifications are needed? What new terms must be added?
+
+Do not write any other sections."""
+
+        self.log_progress("Generating report part 3/4: Applications + Evolution...")
+        messages_3 = [
+            SystemMessage(content="You are a senior academic literature review expert."),
+            HumanMessage(content=part3_prompt),
+        ]
+        part3 = await self._call_llm(messages_3)
+
+        # ──────────────────────────────────────────────
+        # Part 4: 根因分析 + 结论
+        # ──────────────────────────────────────────────
+        part4_prompt = f"""{lang_constraint}
+
+You are a senior academic literature review expert with deep expertise in mathematical modeling and first-principles analysis.
+Core principle: **Focus on underlying formulas, physical mechanisms, and mathematical derivations.**
+
+Research Topic: {topic}
+
+Cluster Analysis Summaries:
+{cluster_summaries_text}
+
+{_WRITING_RULES}
+
+Please write ONLY Sections 5 and 6 of the literature review:
 
 ## 5. Root Cause Analysis and Breakthrough Paths
 ### 5.1 Formula-Level Root Causes of Core Bottlenecks
@@ -664,18 +701,20 @@ Must include:
 - The single most impactful direction for future research, justified from first principles
 
 Requirements:
-- Each argument must cite a specific paper, using [First Author Last Name, Year, Paper Title] format
 - Avoid hollow statements like "this method has broad prospects" or "this field has great potential"
-- Write as a technical report for domain experts, emphasizing formulas, derivations, and numerical values"""
+- Write as a technical report for domain experts, emphasizing formulas, derivations, and numerical values
 
-        self.log_progress("Generating report part 2: Applications + Trends + Conclusion...")
-        messages_2 = [
+Do not write any other sections."""
+
+        self.log_progress("Generating report part 4/4: Root Causes + Conclusion...")
+        messages_4 = [
             SystemMessage(content="You are a senior academic literature review expert."),
-            HumanMessage(content=part2_prompt),
+            HumanMessage(content=part4_prompt),
         ]
-        part2 = await self._call_llm(messages_2)
+        part4 = await self._call_llm(messages_4)
 
-        return f"{part1}\n\n{part2}"
+        # 组合完整报告
+        return f"{part1}\n\n{part2}\n\n{part3}\n\n{part4}"
 
     def _fallback_report(
         self,

@@ -140,9 +140,23 @@ class ClusterAgent(BaseAgent):
         research_topic = kwargs.get("research_topic", "")
 
         try:
-            # 只获取筛选后的相关文献（relevance_score 不为 None）
-            all_papers = await self.workspace.get_literature()
-            papers = [p for p in all_papers if p.relevance_score is not None]
+            # 只获取当前搜索中通过筛选的相关文献
+            # 优先使用 current_search_paper_ids 限定范围，避免旧主题论文混入
+            search_ids = await self.workspace.get_metadata_item("current_search_paper_ids")
+            if search_ids and isinstance(search_ids, list):
+                search_papers = await self.workspace.get_literature(paper_ids=search_ids)
+                self.log_progress(
+                    f"Scoped to {len(search_ids)} papers from current search"
+                )
+            else:
+                # 回退：无搜索记录时加载全部，但先重置所有分数防止旧数据污染
+                self.log_progress(
+                    "No search session found, loading all papers with score reset",
+                    "warning",
+                )
+                await self.workspace.reset_all_relevance_scores()
+                search_papers = await self.workspace.get_literature()
+            papers = [p for p in search_papers if p.relevance_score is not None]
             if not papers:
                 return self._create_result(
                     success=False,
@@ -229,7 +243,7 @@ class ClusterAgent(BaseAgent):
 
             # ⑤.5 领域一致性过滤：移除与主题明显不相关的簇
             labeled_clusters = await self._filter_irrelevant_clusters(
-                labeled_clusters, research_topic
+                labeled_clusters, research_topic, embeddings_dict
             )
 
             # 保存聚类结果
@@ -472,17 +486,71 @@ class ClusterAgent(BaseAgent):
         self,
         clusters: List[ClusterResult],
         research_topic: str,
+        embeddings_dict: Optional[Dict[str, List[float]]] = None,
     ) -> List[ClusterResult]:
         """
         过滤与主题明显不相关的簇。
 
-        对每个簇，检查其代表性论文标题是否与研究主题相关。
-        如果簇内超过半数论文的标题中不包含主题核心词，则移除该簇。
+        策略：计算每个簇内论文 embedding 与研究主题 embedding 的
+        平均余弦相似度。低于阈值则移除该簇。回退到关键词匹配。
         """
         if not research_topic or not clusters:
             return clusters
 
-        # 提取主题核心词（去除停用词）
+        # 优先使用 embedding 语义过滤
+        if embeddings_dict:
+            try:
+                from ..utils.embedding import get_embedding
+
+                topic_embedding = await get_embedding(research_topic)
+                topic_arr = np.array(topic_embedding, dtype=np.float32)
+                t_norm = np.linalg.norm(topic_arr)
+                if t_norm > 0:
+                    topic_arr = topic_arr / t_norm
+
+                min_cluster_similarity = 0.45  # 簇平均相似度下限
+                filtered = []
+                for cluster in clusters:
+                    papers = await self.workspace.get_cluster_papers(cluster.cluster_id)
+                    if not papers:
+                        filtered.append(cluster)
+                        continue
+
+                    # 计算簇内每篇论文与主题的余弦相似度
+                    sims = []
+                    for p in papers:
+                        emb = embeddings_dict.get(p.id)
+                        if emb:
+                            p_arr = np.array(emb, dtype=np.float32)
+                            p_norm = np.linalg.norm(p_arr)
+                            if p_norm > 0:
+                                sims.append(float(np.dot(p_arr / p_norm, topic_arr)))
+
+                    avg_sim = sum(sims) / len(sims) if sims else 0.0
+
+                    if avg_sim >= min_cluster_similarity:
+                        filtered.append(cluster)
+                    else:
+                        self.log_progress(
+                            f"Filtered out cluster {cluster.cluster_id} '{cluster.label}': "
+                            f"avg similarity to topic = {avg_sim:.3f} < {min_cluster_similarity}",
+                            "warning",
+                        )
+
+                if len(filtered) < len(clusters):
+                    self.log_progress(
+                        f"Semantic filtering: removed {len(clusters) - len(filtered)} "
+                        f"off-topic clusters, keeping {len(filtered)}"
+                    )
+                return filtered
+
+            except Exception as e:
+                self.log_progress(
+                    f"Embedding-based filtering failed ({e}), falling back to keywords",
+                    "warning",
+                )
+
+        # 回退：关键词匹配（原有逻辑）
         stop_words = {"of", "the", "a", "an", "in", "for", "and", "or", "to",
                        "with", "on", "by", "from", "at", "is", "are", "was", "were"}
         topic_words = set(w.lower() for w in research_topic.split()
@@ -499,7 +567,6 @@ class ClusterAgent(BaseAgent):
             for paper in papers:
                 title_words = set(w.lower() for w in paper.title.split()
                                   if len(w) > 2)
-                # 检查标题是否与主题有交集
                 if topic_words & title_words:
                     relevant_count += 1
 
@@ -515,7 +582,7 @@ class ClusterAgent(BaseAgent):
 
         if len(filtered) < len(clusters):
             self.log_progress(
-                f"Filtered {len(clusters) - len(filtered)} irrelevant clusters, "
+                f"Keyword filtering: removed {len(clusters) - len(filtered)} clusters, "
                 f"keeping {len(filtered)}"
             )
 

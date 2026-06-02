@@ -159,15 +159,28 @@ class ScreenAgent(BaseAgent):
         llm_threshold = kwargs.get("llm_threshold", (0.61, 0.68))
 
         try:
-            # 获取文献池
-            all_papers = await self.workspace.get_literature()
+            # 获取文献池：优先只筛选当前搜索的论文，避免旧主题论文污染
+            search_ids = await self.workspace.get_metadata_item("current_search_paper_ids")
+            if search_ids and isinstance(search_ids, list):
+                all_papers = await self.workspace.get_literature(paper_ids=search_ids)
+                self.log_progress(
+                    f"Screening {len(all_papers)} papers from current search "
+                    f"(excluded {len(search_ids) - len(all_papers)} missing)"
+                )
+            else:
+                # 回退：无搜索记录时加载全部，先重置所有分数防止旧数据污染
+                self.log_progress(
+                    "No search session found, screening all papers with score reset",
+                    "warning",
+                )
+                await self.workspace.reset_all_relevance_scores()
+                all_papers = await self.workspace.get_literature()
+
             if not all_papers:
                 return self._create_result(
                     success=False,
                     errors=["No papers in workspace"]
                 )
-
-            self.log_progress(f"Screening {len(all_papers)} papers...")
 
             # 获取RQ信息
             rq_questions = []
@@ -212,9 +225,8 @@ class ScreenAgent(BaseAgent):
                         related_rqs=[],
                     ))
 
-            # 批量更新论文相关度分数
-            all_papers_list = await self.workspace.get_literature()
-            relevance_updates = {p.id: None for p in all_papers_list}
+            # 批量更新论文相关度分数（仅当前搜索的论文，不触碰旧主题数据）
+            relevance_updates = {p.id: None for p in all_papers}
             relevant_count = 0
             for result in screening_results:
                 if result.relevant:

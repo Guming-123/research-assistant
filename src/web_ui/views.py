@@ -139,46 +139,73 @@ def render_progress_timeline(
     completed_stages: List[str],
     stage_durations: Optional[Dict[str, str]] = None,
     elapsed: str = "",
+    latest_message: str = "",
 ) -> str:
-    """生成流水线阶段进度的 HTML 时间线（含耗时）"""
+    """生成流水线阶段进度的 HTML 时间线（含耗时和实时消息）"""
     stages = [
-        ("initialization", "初始化"),
-        ("search", "文献搜索"),
-        ("screen", "相关度筛选"),
-        ("cluster", "语义聚类"),
-        ("summary", "综述生成"),
-        ("completed", "完成"),
+        ("initialization", "⏳", "初始化"),
+        ("search", "🔍", "文献搜索"),
+        ("screen", "🎯", "相关度筛选"),
+        ("cluster", "📊", "语义聚类"),
+        ("summary", "📝", "综述生成"),
+        ("completed", "✅", "完成"),
     ]
     durations = stage_durations or {}
 
     items = []
-    for stage_key, stage_name in stages:
+    for stage_key, default_icon, stage_name in stages:
         dur = durations.get(stage_key)
         dur_text = f" <span style='font-size:0.75em;color:#888;'>({dur})</span>" if dur else ""
 
         if stage_key in completed_stages:
             color = "#2e7d32"
-            icon = "●"
-            weight = "bold"
+            icon = "✅"
+            style = f"color:{color};font-weight:bold;font-size:1.05em;"
         elif stage_key == current_stage:
             color = "#1565c0"
-            icon = "▶"
-            weight = "bold"
+            icon = "⏳"
+            # Pulsing highlight for the active stage
+            style = (
+                f"color:{color};font-weight:bold;font-size:1.05em;"
+                f"padding:2px 8px;border-radius:4px;"
+                f"background:rgba(21,101,192,0.08);"
+                f"border:1px solid rgba(21,101,192,0.25);"
+            )
         else:
             color = "#bbb"
             icon = "○"
-            weight = "normal"
+            style = f"color:{color};font-size:1.05em;"
 
         items.append(
-            f'<span style="color:{color};font-weight:{weight};font-size:1.1em;">'
-            f'{icon} {stage_name}{dur_text}</span>'
+            f'<span style="{style}">{icon} {stage_name}{dur_text}</span>'
         )
 
     elapsed_html = ""
     if elapsed:
-        elapsed_html = f'<span style="font-size:0.9em;color:#666;margin-left:12px;">总耗时: {elapsed}</span>'
+        elapsed_html = (
+            f'<span style="font-size:0.9em;color:#666;margin-left:12px;">'
+            f'⏱️ 总耗时: {elapsed}</span>'
+        )
 
-    return '<div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;">' + "  →  ".join(items) + elapsed_html + "</div>"
+    # 最新日志消息（截断过长的行）
+    msg_html = ""
+    if latest_message:
+        short_msg = latest_message.strip().split("\n")[-1][:120]
+        msg_html = (
+            f'<div style="margin-top:6px;font-size:0.85em;color:#555;'
+            f'font-family:monospace;white-space:nowrap;overflow:hidden;'
+            f'text-overflow:ellipsis;">💬 {short_msg}</div>'
+        )
+
+    return (
+        '<div style="padding:8px 0;">'
+        '<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">'
+        + " → ".join(items)
+        + elapsed_html
+        + "</div>"
+        + msg_html
+        + "</div>"
+    )
 
 
 def format_report_list(reports_dir: str) -> List[Tuple[str, str]]:

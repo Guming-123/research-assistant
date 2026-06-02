@@ -11,6 +11,7 @@ import gradio as gr
 
 from .handlers import (
     UIState,
+    find_latest_report,
     list_topics,
     load_checkpoints,
     load_cluster_detail,
@@ -27,6 +28,7 @@ from .handlers import (
     run_single_stage,
     select_topic,
 )
+from .views import render_progress_timeline
 
 # 确保 src 包可导入
 _project_root = str(Path(__file__).resolve().parent.parent.parent)
@@ -99,23 +101,35 @@ def create_app(workspace_path: str = "./workspace") -> gr.Blocks:
                 interactive=False,
                 elem_classes=["progress-log"],
             )
+            report_preview = gr.Markdown(
+                label="综述报告预览",
+                visible=False,
+                elem_classes=["report-preview"],
+            )
 
             async def on_run(topic, ys, ye, mr, am, stage, progress=gr.Progress()):
-                """运行流水线或单阶段，实时流式输出日志"""
+                """运行流水线或单阶段，实时流式输出日志和进度"""
                 needs_topic = stage in ("全流程", "文献搜索")
                 if needs_topic and (not topic or not topic.strip()):
-                    yield "<div>请输入研究主题</div>", "请输入研究主题。"
+                    yield (
+                        "<div>❌ 请输入研究主题</div>",
+                        "请输入研究主题。",
+                        gr.update(visible=False),
+                    )
                     return
 
-                # 限频：progress 回调最多每 2 秒触发一次，减少 SSE 推送开销
+                # 实时跟踪当前阶段信息
+                _stage_info = {"cur": "initialization", "done": [], "msg": ""}
+
+                # 限频：progress 回调最多每 1.5 秒触发一次
                 _last_progress_time = [0.0]
                 import time as _time
 
                 def progress_cb(cur, done, msg):
-                    now = _time.monotonic()
-                    if now - _last_progress_time[0] < 2.0:
-                        return
-                    _last_progress_time[0] = now
+                    _stage_info["cur"] = cur
+                    _stage_info["done"] = list(done)
+                    _stage_info["msg"] = msg
+                    # Gradio Progress 更新（直接赋值，不做额外计算）
                     stage_names = {
                         "initialization": "初始化",
                         "search": "文献搜索",
@@ -124,13 +138,16 @@ def create_app(workspace_path: str = "./workspace") -> gr.Blocks:
                         "summary": "综述生成",
                         "completed": "完成",
                     }
-                    stages_order = ["initialization", "search", "screen", "cluster", "summary", "completed"]
+                    stages_order = [
+                        "initialization", "search", "screen",
+                        "cluster", "summary", "completed",
+                    ]
                     done_count = len(done)
                     frac = (done_count + 0.5) / len(stages_order)
-                    progress(frac, desc=f"{stage_names.get(cur, cur)}: {msg[:60]}")
+                    desc = stage_names.get(cur, cur)
+                    progress(frac, desc=desc)
 
                 logs_buffer = []
-                last_count = 0
 
                 if stage == "全流程":
                     pipeline_task = asyncio.create_task(
@@ -149,28 +166,61 @@ def create_app(workspace_path: str = "./workspace") -> gr.Blocks:
                         )
                     )
 
-                # 轮询日志缓冲区，有新内容就 yield 更新 UI
+                # 轮询并实时更新 UI
+                # 性能关键：减少 yield 频次，仅在内容变化时才推送
+                last_count = 0
+                last_yield_time = 0.0
                 while not pipeline_task.done():
-                    await asyncio.sleep(1.0)
-                    if len(logs_buffer) > last_count:
-                        # 只发送最近 200 行，避免大字符串 join 开销
-                        visible = logs_buffer[-200:]
-                        yield "<div>运行中...</div>", "\n".join(visible)
-                        last_count = len(logs_buffer)
+                    await asyncio.sleep(1.5)  # 1.5s 轮询间隔（减少 SSE 开销）
+                    now = _time.monotonic()
 
-                # 结束，获取最终结果
+                    # 只在日志有变化 且 距上次 yield ≥ 2s 时才推送
+                    has_new = len(logs_buffer) > last_count
+                    enough_time = now - last_yield_time >= 2.0
+
+                    if has_new or enough_time:
+                        live_timeline = render_progress_timeline(
+                            _stage_info["cur"],
+                            _stage_info["done"],
+                            latest_message=_stage_info["msg"],
+                        )
+                        # 限制传输的日志行数（最多 80 行，减少 payload）
+                        visible = logs_buffer[-80:]
+                        yield live_timeline, "\n".join(visible), gr.update(visible=False)
+                        last_count = len(logs_buffer)
+                        last_yield_time = now
+
+                # 流水线结束，获取最终结果
                 try:
                     timeline, final_logs = pipeline_task.result()
                 except Exception as e:
-                    timeline = "<div>运行出错</div>"
+                    timeline = "<div>❌ 运行出错</div>"
                     final_logs = "\n".join(logs_buffer[-500:]) + f"\n错误: {e}"
 
-                yield timeline, final_logs
+                # 尝试加载最新报告并展示
+                report_md = ""
+                report_path = find_latest_report(state)
+                if report_path:
+                    try:
+                        report_md = load_report_content(report_path)
+                    except Exception:
+                        report_md = ""
+
+                report_update = (
+                    gr.update(value=report_md, visible=True)
+                    if report_md
+                    else gr.update(
+                        value="*流水线已完成，但未找到报告文件。请到「综述报告」Tab 查看。*",
+                        visible=True,
+                    )
+                )
+
+                yield timeline, final_logs, report_update
 
             run_btn.click(
                 fn=on_run,
                 inputs=[topic_input, year_start, year_end, max_results, auto_mode, stage_selector],
-                outputs=[progress_html, log_output],
+                outputs=[progress_html, log_output, report_preview],
             )
 
         # ════════════════════════════════════════

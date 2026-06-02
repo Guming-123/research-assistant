@@ -32,20 +32,44 @@ _pipeline_running = False
 
 
 class _LogHandler(logging.Handler):
-    """将 Python logging 输出追加到列表缓冲区，供 UI 实时读取"""
+    """将 Python logging 输出追加到列表缓冲区，供 UI 实时读取
+
+    性能优化：
+    - 只格式化 INFO 及以上级别的消息（DEBUG 直接跳过）
+    - 缓冲区限制最大 500 条，超出后丢弃旧条目
+    - progress_callback 限频调用，避免高频开销
+    """
+
+    MAX_BUFFER_SIZE = 500
 
     def __init__(self, buffer: list, progress_callback=None, get_stage_info=None):
         super().__init__()
         self.buffer = buffer
         self.progress_callback = progress_callback
         self.get_stage_info = get_stage_info
+        self._last_cb_time = 0.0
 
     def emit(self, record):
+        # 跳过 DEBUG 级别，减少无用的格式化开销
+        if record.levelno < logging.INFO:
+            return
+
         msg = self.format(record)
+
+        # 有界缓冲区：超出上限时丢弃最旧的 20%
+        if len(self.buffer) >= self.MAX_BUFFER_SIZE:
+            del self.buffer[: self.MAX_BUFFER_SIZE // 5]
+
         self.buffer.append(msg)
+
+        # progress_callback 限频：最多每 3 秒调用一次
         if self.progress_callback and self.get_stage_info:
-            cur, done = self.get_stage_info()
-            self.progress_callback(cur, done, msg)
+            import time as _t
+            now = _t.monotonic()
+            if now - self._last_cb_time >= 3.0:
+                self._last_cb_time = now
+                cur, done = self.get_stage_info()
+                self.progress_callback(cur, done, msg)
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -67,7 +91,7 @@ class UIState:
     def __init__(self, workspace_path: str = "./workspace"):
         self.workspace_path = workspace_path
         self.workspace = SharedWorkspace(workspace_path)
-        self.rq_manager = RQManager(workspace_path)
+        self.rq_manager = RQManager(workspace_path, workspace=self.workspace)
         self._initialized = False
 
     async def ensure_initialized(self):
@@ -141,6 +165,7 @@ async def run_pipeline(
 
         # 注册 BufferHandler：捕获所有 src.* 的日志到 logs_buffer
         src_logger = logging.getLogger("src")
+        src_logger.setLevel(logging.INFO)  # 关键：确保 INFO 级别日志被处理
 
         def get_stage_info():
             return (
@@ -239,6 +264,7 @@ async def run_single_stage(
 
     # 注册 BufferHandler
     src_logger = logging.getLogger("src")
+    src_logger.setLevel(logging.INFO)  # 关键：确保 INFO 级别日志被处理
     buf_handler = _LogHandler(logs, progress_callback, lambda: (_STAGE_NAMES.get(stage_label, ""), []))
     buf_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
     src_logger.addHandler(buf_handler)
@@ -489,6 +515,27 @@ def load_report_content(report_path: str) -> str:
     if not p.exists():
         return "报告文件不存在"
     return p.read_text(encoding="utf-8")
+
+
+def find_latest_report(state: UIState) -> Optional[str]:
+    """
+    查找最新生成的综述报告（优先主报告，回退到 fallback）。
+
+    Returns:
+        报告文件的完整路径，找不到则返回 None
+    """
+    reports_dir = Path(state.workspace_path) / "reports"
+    if not reports_dir.exists():
+        return None
+
+    reports = sorted(reports_dir.glob("*.md"), reverse=True)
+    # 优先返回非 fallback 报告
+    main_reports = [r for r in reports if "_fallback" not in r.name]
+    if main_reports:
+        return str(main_reports[0])
+    if reports:
+        return str(reports[0])
+    return None
 
 
 # ──────────────────────────────────────────────

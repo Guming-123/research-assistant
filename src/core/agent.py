@@ -21,7 +21,7 @@ from ..utils.llm import get_llm_client
 from ..utils.exceptions import LLMError, ValidationError
 
 # 全局 LLM 并发信号量（控制同时向 GLM API 发送的请求数）
-_LLM_SEMAPHORE = asyncio.Semaphore(5)
+_LLM_SEMAPHORE = asyncio.Semaphore(15)
 logger = logging.getLogger(__name__)
 
 _CONFIG_CACHE: Optional[Dict[str, Any]] = None
@@ -162,6 +162,7 @@ class BaseAgent(ABC):
         self,
         messages: List[BaseMessage],
         response_format: Optional[Dict[str, str]] = None,
+        max_tokens: Optional[int] = None,
         **kwargs,
     ) -> str:
         """
@@ -170,6 +171,7 @@ class BaseAgent(ABC):
         Args:
             messages: 消息列表
             response_format: 响应格式（用于结构化输出）
+            max_tokens: 覆盖本次调用的最大输出 token 数（可选）
             **kwargs: 额外参数
 
         Returns:
@@ -180,7 +182,10 @@ class BaseAgent(ABC):
                 if response_format:
                     kwargs["response_format"] = {"type": "json_object"}
 
-                response = await self.llm.ainvoke(messages, **kwargs)
+                # 按需覆盖 max_tokens
+                llm = self.llm.bind(max_tokens=max_tokens) if max_tokens else self.llm
+
+                response = await llm.ainvoke(messages, **kwargs)
                 return response.content
 
             except (ConnectionError, TimeoutError) as e:

@@ -4,7 +4,7 @@ Research Question Manager - 层级研究问题管理器
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 from enum import Enum
 import json
 
@@ -179,17 +179,28 @@ class RQManager:
     - 管理RQ状态
     - 提供RQ查询接口
     - 生成RQ相关的Prompt
+
+    存储策略：
+    - 优先使用 SharedWorkspace 的 workspace_metadata 表按 research_topic 隔离
+    - 回退到 rq_tree.json 文件（兼容无 workspace 的场景）
     """
 
-    def __init__(self, workspace_path: str = "./workspace"):
+    def __init__(
+        self,
+        workspace_path: str = "./workspace",
+        workspace: Optional["SharedWorkspace"] = None,
+    ):
         """
         初始化RQ管理器
 
         Args:
             workspace_path: 工作区路径
+            workspace: SharedWorkspace 实例（传入后启用按主题隔离存储）
         """
         self.workspace_path = workspace_path
+        self._workspace = workspace
         self.current_tree: Optional[RQTree] = None
+        self._current_topic: Optional[str] = None
         self._templates = self._load_templates()
 
     def _load_templates(self) -> Dict[str, str]:
@@ -234,6 +245,7 @@ class RQManager:
             root_questions = await self._generate_default_rqs(research_topic)
 
         self.current_tree = RQTree(research_topic=research_topic, root_questions=root_questions)
+        self._current_topic = research_topic
         await self.save()
         return self.current_tree
 
@@ -522,19 +534,60 @@ Please structure your response as:
         return template.format(rq=rq.question, context=cluster_context)
 
     async def save(self) -> None:
-        """保存RQ树"""
-        if self.current_tree:
-            import aiofiles
-            from pathlib import Path
+        """保存RQ树（优先 SQLite 按主题隔离，回退 JSON 文件）"""
+        if not self.current_tree:
+            return
 
-            path = Path(self.workspace_path) / "rq_tree.json"
-            path.parent.mkdir(parents=True, exist_ok=True)
+        data = self.current_tree.to_dict()
+        topic = self.current_tree.research_topic
 
-            async with aiofiles.open(path, "w", encoding="utf-8") as f:
-                await f.write(json.dumps(self.current_tree.to_dict(), ensure_ascii=False, indent=2))
+        # 优先使用 SQLite workspace_metadata 按 research_topic 隔离
+        if self._workspace and topic:
+            try:
+                self._workspace.set_topic(topic)
+                await self._workspace.save_metadata_item(
+                    "rq_tree", data,
+                    agent="RQManager", stage="initialization",
+                )
+                logger.info(f"RQ tree saved to SQLite for topic: '{topic}'")
+                return
+            except Exception as e:
+                logger.warning(f"Failed to save RQ tree to SQLite: {e}, falling back to JSON")
 
-    async def load(self) -> Optional[RQTree]:
-        """加载RQ树"""
+        # 回退：保存到 JSON 文件
+        import aiofiles
+        from pathlib import Path
+
+        path = Path(self.workspace_path) / "rq_tree.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        async with aiofiles.open(path, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(data, ensure_ascii=False, indent=2))
+        logger.info(f"RQ tree saved to JSON file for topic: '{topic}'")
+
+    async def load(self, topic: Optional[str] = None) -> Optional[RQTree]:
+        """
+        加载RQ树（优先 SQLite 按主题加载，回退 JSON 文件）
+
+        Args:
+            topic: 要加载的主题，None 时使用上次的 _current_topic
+        """
+        load_topic = topic or self._current_topic
+
+        # 优先从 SQLite 加载
+        if self._workspace and load_topic:
+            try:
+                self._workspace.set_topic(load_topic)
+                data = await self._workspace.get_metadata_item("rq_tree")
+                if data and isinstance(data, dict) and "research_topic" in data:
+                    self.current_tree = RQTree.from_dict(data)
+                    self._current_topic = self.current_tree.research_topic
+                    logger.info(f"RQ tree loaded from SQLite for topic: '{load_topic}'")
+                    return self.current_tree
+            except Exception as e:
+                logger.warning(f"Failed to load RQ tree from SQLite: {e}, falling back to JSON")
+
+        # 回退：从 JSON 文件加载
         import aiofiles
         from pathlib import Path
 
@@ -545,6 +598,8 @@ Please structure your response as:
         async with aiofiles.open(path, encoding="utf-8") as f:
             data = json.loads(await f.read())
             self.current_tree = RQTree.from_dict(data)
+            self._current_topic = self.current_tree.research_topic
+            logger.info(f"RQ tree loaded from JSON file")
             return self.current_tree
 
     def export_for_report(self) -> Dict[str, Any]:

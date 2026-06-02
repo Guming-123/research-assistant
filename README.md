@@ -24,7 +24,7 @@
           ▼          ▼          ▼          ▼
      ┌──────────────────────────────────────────────┐
      │            Shared Workspace                  │
-     │       文献库 · 聚类 · 摘要 · 嵌入 · 报告     │
+     │       文献库 · 聚类 · 摘要 · 嵌入 · 报告       │
      └──────────────────────────────────────────────┘
 ```
 
@@ -142,7 +142,7 @@ clustering:
 
 ## 使用方法
 
-### Web UI（推荐）
+### Web UI（推荐但运行较慢）
 
 ```bash
 python run_web.py
@@ -158,7 +158,7 @@ python run_web.py
 | Review Reports | 查看生成的综述报告 |
 | System Status | 工作空间统计信息和RQ树 |
 
-### CLI 完整流程
+### CLI 完整流程（较快，但是没有可视化）
 
 ```bash
 python main.py --topic "subthreshold swing reduction in transistors" --full

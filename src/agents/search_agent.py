@@ -138,6 +138,15 @@ class SearchAgent(BaseAgent):
             await self.workspace.add_literature(literature_records)
             self.log_progress(f"Saved {len(literature_records)} papers to workspace")
 
+            # ⑤.5 记录本次搜索的论文 ID，供后续 Screen/Cluster 阶段使用
+            #     避免将旧主题的残留论文带入新主题的筛选和聚类
+            current_ids = [r.id for r in literature_records]
+            await self.workspace.save_metadata_item(
+                "current_search_paper_ids", current_ids,
+                agent=self.name, stage="search",
+            )
+            self.log_progress(f"Recorded {len(current_ids)} paper IDs for current search session")
+
             # ⑥ PDF处理（可选）
             pdf_processed = 0
             if enable_pdf_download:

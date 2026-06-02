@@ -708,6 +708,15 @@ class SharedWorkspace:
 
         await asyncio.to_thread(_update)
 
+    async def reset_all_relevance_scores(self) -> None:
+        """将所有论文的 relevance_score 重置为 NULL（仅在无搜索记录时的安全回退）"""
+
+        def _reset():
+            with self._conn:
+                self._conn.execute("UPDATE literature SET relevance_score = NULL")
+
+        await asyncio.to_thread(_reset)
+
     async def clear_topic(self) -> None:
         """清除当前主题的派生数据，保留论文和 embeddings"""
         rt = self.research_topic
@@ -716,8 +725,9 @@ class SharedWorkspace:
             with self._conn:
                 for table in ["clusters", "summaries", "workspace_metadata"]:
                     self._conn.execute(f"DELETE FROM {table} WHERE research_topic = ?", (rt,))
-                # 清除所有论文的 relevance_score，确保只有当前主题筛选后的论文有分数
-                self._conn.execute("UPDATE literature SET relevance_score = NULL")
+                # 注意：不再全局清除 relevance_score
+                # Screen Agent 会仅对当前搜索的论文设置 relevance_score，
+                # 避免清除旧主题论文的已有评分
 
         await asyncio.to_thread(_clear)
         logger.info(f"Cleared derived data for topic: '{rt}' (literature & embeddings preserved)")
