@@ -91,7 +91,7 @@ class UIState:
     def __init__(self, workspace_path: str = "./workspace"):
         self.workspace_path = workspace_path
         self.workspace = SharedWorkspace(workspace_path)
-        self.rq_manager = RQManager(workspace_path, workspace=self.workspace)
+        self.rq_manager = RQManager(workspace_path)
         self._initialized = False
 
     async def ensure_initialized(self):

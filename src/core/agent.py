@@ -166,7 +166,7 @@ class BaseAgent(ABC):
         **kwargs,
     ) -> str:
         """
-        调用LLM的通用方法（带并发信号量）
+        调用LLM的通用方法（带并发信号量 + 指数退避重试）
 
         Args:
             messages: 消息列表
@@ -177,26 +177,52 @@ class BaseAgent(ABC):
         Returns:
             str: LLM响应
         """
+        max_retries = self.config.retry_attempts  # 默认 3
+        base_delay = 2.0
+
         async with _LLM_SEMAPHORE:
-            try:
-                if response_format:
-                    kwargs["response_format"] = {"type": "json_object"}
+            for attempt in range(max_retries + 1):
+                try:
+                    if response_format:
+                        kwargs["response_format"] = {"type": "json_object"}
 
-                # 按需覆盖 max_tokens
-                llm = self.llm.bind(max_tokens=max_tokens) if max_tokens else self.llm
+                    # 按需覆盖 max_tokens
+                    llm = self.llm.bind(max_tokens=max_tokens) if max_tokens else self.llm
 
-                response = await llm.ainvoke(messages, **kwargs)
-                return response.content
+                    response = await llm.ainvoke(messages, **kwargs)
+                    return response.content
 
-            except (ConnectionError, TimeoutError) as e:
-                self.log_progress(f"LLM连接失败: {e}", "error")
-                raise LLMError(f"LLM connection error: {e}") from e
-            except json.JSONDecodeError as e:
-                self.log_progress(f"LLM返回的JSON格式错误: {e}", "error")
-                raise LLMError(f"LLM returned invalid JSON: {e}") from e
-            except Exception as e:
-                self.log_progress(f"LLM调用失败: {e}", "error")
-                raise LLMError(f"LLM invocation failed: {e}") from e
+                except (ConnectionError, TimeoutError) as e:
+                    if attempt < max_retries:
+                        delay = base_delay * (2 ** attempt)
+                        self.log_progress(
+                            f"LLM连接失败 (尝试 {attempt+1}/{max_retries+1}), "
+                            f"{delay:.0f}s后重试: {e}", "warning"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    self.log_progress(f"LLM连接失败, 所有重试用尽: {e}", "error")
+                    raise LLMError(f"LLM connection error after {max_retries+1} attempts: {e}") from e
+
+                except json.JSONDecodeError as e:
+                    # JSON 解析错误不重试，直接失败
+                    self.log_progress(f"LLM返回的JSON格式错误: {e}", "error")
+                    raise LLMError(f"LLM returned invalid JSON: {e}") from e
+
+                except Exception as e:
+                    err_str = str(e).lower()
+                    # 速率限制 / 服务端错误 -> 重试
+                    if any(kw in err_str for kw in ("rate", "429", "503", "500", "timeout")):
+                        if attempt < max_retries:
+                            delay = base_delay * (2 ** attempt)
+                            self.log_progress(
+                                f"LLM服务端错误 (尝试 {attempt+1}/{max_retries+1}), "
+                                f"{delay:.0f}s后重试: {e}", "warning"
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                    self.log_progress(f"LLM调用失败: {e}", "error")
+                    raise LLMError(f"LLM invocation failed: {e}") from e
 
     def _create_system_prompt(self, prompt_template: str, **kwargs) -> SystemMessage:
         """创建系统提示消息"""

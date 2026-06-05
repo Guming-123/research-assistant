@@ -151,18 +151,22 @@ class ArxivAPI:
 
     BASE_URL = "https://export.arxiv.org/api/query"
 
-    def __init__(self, timeout: int = 30, max_retries: int = 1):
+    def __init__(self, timeout: int = 30, max_retries: int = 1, session: Optional[aiohttp.ClientSession] = None):
         """初始化客户端"""
-        self.session: Optional[aiohttp.ClientSession] = None
+        self._external_session = session
+        self.session: Optional[aiohttp.ClientSession] = session
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self.max_retries = max_retries
 
     async def __aenter__(self):
-        self.session = aiohttp.ClientSession(timeout=self.timeout)
+        if self._external_session is None:
+            self.session = aiohttp.ClientSession(timeout=self.timeout)
+        else:
+            self.session = self._external_session
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
+        if self._external_session is None and self.session:
             await self.session.close()
 
     async def search_papers(

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # 全局变量缓存本地模型
 _local_models = {}
-_executor = ThreadPoolExecutor(max_workers=1)
+_executor = ThreadPoolExecutor(max_workers=4)
 
 
 def _get_local_model(model_name: str):

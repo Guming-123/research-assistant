@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 import logging
 
+import aiohttp
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
@@ -268,7 +269,7 @@ class SearchAgent(BaseAgent):
         max_results: int,
     ) -> List[Dict[str, Any]]:
         """
-        多源检索（使用新的数据库 API）
+        多源检索（查询串行，数据库并行）
 
         Args:
             queries: 查询列表
@@ -285,99 +286,71 @@ class SearchAgent(BaseAgent):
 
         arxiv_rate_limited = False
 
-        for query_info in queries:
-            query = query_info["query"]
-            databases = query_info.get("databases", ["arxiv", "openalex"])
+        async with aiohttp.ClientSession() as shared_session:
+            for query_info in queries:
+                query = query_info["query"]
+                databases = query_info.get("databases", ["arxiv", "openalex"])
 
-            self.log_progress(f"Query: '{query}' from {len(databases)} databases")
+                self.log_progress(f"Query: '{query}' from {len(databases)} databases")
 
-            # arXiv（被限速后跳过）
-            if "arxiv" in databases and not arxiv_rate_limited:
-                try:
-                    self.log_progress(f"  → arXiv: {query}")
-                    async with ArxivAPI() as api:
-                        papers = await api.search_papers(
-                            query=query,
-                            max_results=results_per_query,
-                        )
-                        if not papers:
-                            arxiv_rate_limited = True
-                            self.log_progress(f"  ⚠ arXiv returned 0 papers, skipping remaining arXiv queries", "warning")
+                # 构建并行任务：为每个目标数据库创建一个搜索任务
+                async def _search_db(db_name: str, q: str) -> List[Dict[str, Any]]:
+                    """搜索单个数据库"""
+                    nonlocal arxiv_rate_limited
+                    try:
+                        if db_name == "arxiv":
+                            if arxiv_rate_limited:
+                                self.log_progress(f"  ⊘ arXiv skipped (rate limited)")
+                                return []
+                            async with ArxivAPI(session=shared_session) as api:
+                                papers = await api.search_papers(query=q, max_results=results_per_query)
+                                if not papers:
+                                    arxiv_rate_limited = True
+                                    self.log_progress(f"  ⚠ arXiv returned 0 papers, skipping remaining", "warning")
+                                else:
+                                    self.log_progress(f"  ✓ arXiv: {len(papers)} papers")
+                                return papers
+
+                        elif db_name == "pubmed":
+                            async with PubMedAPI(session=shared_session) as api:
+                                papers = await api.search_papers(query=q, max_results=results_per_query, year_range=year_range)
+                                self.log_progress(f"  ✓ PubMed: {len(papers)} papers")
+                                return papers
+
+                        elif db_name == "dblp":
+                            async with DBLPAPI(session=shared_session) as api:
+                                papers = await api.search_papers(query=q, max_results=results_per_query)
+                                self.log_progress(f"  ✓ DBLP: {len(papers)} papers")
+                                return papers
+
+                        elif db_name == "europe_pmc":
+                            async with EuropePMCAPI(session=shared_session) as api:
+                                papers = await api.search_papers(query=q, max_results=results_per_query, year_range=year_range)
+                                self.log_progress(f"  ✓ Europe PMC: {len(papers)} papers")
+                                return papers
+
+                        elif db_name == "openalex":
+                            async with OpenAlexAPI(session=shared_session) as api:
+                                papers = await api.search_papers(query=q, max_results=results_per_query, year_range=year_range)
+                                self.log_progress(f"  ✓ OpenAlex: {len(papers)} papers")
+                                return papers
+
                         else:
-                            all_papers.extend(papers)
-                            self.log_progress(f"  ✓ arXiv: {len(papers)} papers")
-                        await asyncio.sleep(3.0)
-                except Exception as e:
-                    arxiv_rate_limited = True
-                    self.log_progress(f"  ✗ arXiv failed: {e}", "warning")
-            elif "arxiv" in databases and arxiv_rate_limited:
-                self.log_progress(f"  ⊘ arXiv skipped (rate limited)")
+                            return []
+                    except Exception as e:
+                        self.log_progress(f"  ✗ {db_name} failed: {e}", "warning")
+                        return []
 
-            # PubMed
-            if "pubmed" in databases:
-                try:
-                    self.log_progress(f"  → PubMed: {query}")
-                    async with PubMedAPI() as api:
-                        papers = await api.search_papers(
-                            query=query,
-                            max_results=results_per_query,
-                            year_range=year_range,
-                        )
+                # 并行搜索同一查询的多个目标数据库
+                tasks = [_search_db(db, query) for db in databases]
+                results = await asyncio.gather(*tasks)
+
+                for papers in results:
+                    if isinstance(papers, list):
                         all_papers.extend(papers)
-                        self.log_progress(f"  ✓ PubMed: {len(papers)} papers")
-                        await asyncio.sleep(0.5)
-                except Exception as e:
-                    self.log_progress(f"  ✗ PubMed failed: {e}", "warning")
 
-            # DBLP
-            if "dblp" in databases:
-                try:
-                    self.log_progress(f"  → DBLP: {query}")
-                    async with DBLPAPI() as api:
-                        papers = await api.search_papers(
-                            query=query,
-                            max_results=results_per_query,
-                        )
-                        all_papers.extend(papers)
-                        self.log_progress(f"  ✓ DBLP: {len(papers)} papers")
-                        await asyncio.sleep(0.5)
-                except Exception as e:
-                    self.log_progress(f"  ✗ DBLP failed: {e}", "warning")
-
-            # Europe PMC
-            if "europe_pmc" in databases:
-                try:
-                    self.log_progress(f"  → Europe PMC: {query}")
-                    async with EuropePMCAPI() as api:
-                        papers = await api.search_papers(
-                            query=query,
-                            max_results=results_per_query,
-                            year_range=year_range,
-                        )
-                        all_papers.extend(papers)
-                        self.log_progress(f"  ✓ Europe PMC: {len(papers)} papers")
-                        await asyncio.sleep(0.5)
-                except Exception as e:
-                    self.log_progress(f"  ✗ Europe PMC failed: {e}", "warning")
-
-            # OpenAlex
-            if "openalex" in databases:
-                try:
-                    self.log_progress(f"  → OpenAlex: {query}")
-                    async with OpenAlexAPI() as api:
-                        papers = await api.search_papers(
-                            query=query,
-                            max_results=results_per_query,
-                            year_range=year_range,
-                        )
-                        all_papers.extend(papers)
-                        self.log_progress(f"  ✓ OpenAlex: {len(papers)} papers")
-                        await asyncio.sleep(0.5)
-                except Exception as e:
-                    self.log_progress(f"  ✗ OpenAlex failed: {e}", "warning")
-
-            # 延迟避免过度请求
-            await asyncio.sleep(1.0)
+                # 查询间短暂间隔，避免过于频繁
+                await asyncio.sleep(0.5)
 
         self.log_progress(f"Total papers retrieved: {len(all_papers)}")
         return all_papers

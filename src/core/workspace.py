@@ -221,12 +221,22 @@ class SharedWorkspace:
 
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
+        self._apply_pragmas()
 
         # 当前 topic 上下文
         self._current_topic: Optional[str] = None
+
+    def _apply_pragmas(self):
+        """应用 SQLite 性能优化 PRAGMA"""
+        conn = self._conn
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA synchronous=NORMAL")      # WAL 模式下安全，减少刷盘频率
+        conn.execute("PRAGMA cache_size=-64000")         # 64MB 页缓存
+        conn.execute("PRAGMA temp_store=MEMORY")         # 临时表在内存中
+        conn.execute("PRAGMA mmap_size=268435456")       # 256MB 内存映射 I/O
+        conn.execute("PRAGMA busy_timeout=30000")        # 30 秒锁等待超时
 
     def close(self):
         if self._conn:
@@ -473,18 +483,23 @@ class SharedWorkspace:
 
         def _insert():
             count = 0
+            _json_cols = ("authors", "keywords", "metadata")
+            rows = []
+            for rec in records:
+                if not rec.id:
+                    rec.id = str(hash(rec))
+                rows.append([
+                    json.dumps(getattr(rec, c), ensure_ascii=False) if c in _json_cols else getattr(rec, c)
+                    for c in _LIT_COLUMNS
+                ])
             with self._conn:
-                for rec in records:
-                    if not rec.id:
-                        rec.id = str(hash(rec))
-                    try:
-                        self._conn.execute(
-                            f"INSERT OR IGNORE INTO literature ({','.join(_LIT_COLUMNS)}) VALUES ({','.join(['?']*len(_LIT_COLUMNS))})",
-                            [json.dumps(getattr(rec, c), ensure_ascii=False) if c in ("authors", "keywords", "metadata") else getattr(rec, c) for c in _LIT_COLUMNS],
-                        )
-                        count += self._conn.changes
-                    except Exception:
-                        pass
+                before = self._conn.execute("SELECT COUNT(*) FROM literature").fetchone()[0]
+                self._conn.executemany(
+                    f"INSERT OR IGNORE INTO literature ({','.join(_LIT_COLUMNS)}) VALUES ({','.join(['?']*len(_LIT_COLUMNS))})",
+                    rows,
+                )
+                after = self._conn.execute("SELECT COUNT(*) FROM literature").fetchone()[0]
+                count = after - before
             return count
 
         return await asyncio.to_thread(_insert)
@@ -661,12 +676,15 @@ class SharedWorkspace:
     async def batch_save_embeddings(self, embeddings: Dict[str, List[float]]) -> None:
 
         def _save():
+            rows = [
+                (pid, self._emb_to_blob(vec), len(vec))
+                for pid, vec in embeddings.items()
+            ]
             with self._conn:
-                for pid, vec in embeddings.items():
-                    self._conn.execute(
-                        "INSERT OR REPLACE INTO embeddings (paper_id, embedding, dimensions) VALUES (?, ?, ?)",
-                        (pid, self._emb_to_blob(vec), len(vec)),
-                    )
+                self._conn.executemany(
+                    "INSERT OR REPLACE INTO embeddings (paper_id, embedding, dimensions) VALUES (?, ?, ?)",
+                    rows,
+                )
 
         await asyncio.to_thread(_save)
 
@@ -699,12 +717,12 @@ class SharedWorkspace:
         """批量更新相关度分数。论文全局共享，不同主题对同一论文的评分会互相覆盖。"""
 
         def _update():
+            rows = [(score, pid) for pid, score in updates.items()]
             with self._conn:
-                for pid, score in updates.items():
-                    self._conn.execute(
-                        "UPDATE literature SET relevance_score = ?, updated_at = datetime('now') WHERE id = ?",
-                        (score, pid),
-                    )
+                self._conn.executemany(
+                    "UPDATE literature SET relevance_score = ?, updated_at = datetime('now') WHERE id = ?",
+                    rows,
+                )
 
         await asyncio.to_thread(_update)
 
@@ -867,8 +885,7 @@ class SharedWorkspace:
             shutil.copy2(str(cp_db), str(self.base_path / "research.db"))
             self._conn = sqlite3.connect(str(self.base_path / "research.db"), check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA foreign_keys=ON")
+            self._apply_pragmas()
 
         await asyncio.to_thread(_restore)
 

@@ -28,17 +28,21 @@ class PubMedAPI:
 
     BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, session: Optional[aiohttp.ClientSession] = None):
         """初始化客户端"""
         self.api_key = api_key
-        self.session: Optional[aiohttp.ClientSession] = None
+        self._external_session = session
+        self.session: Optional[aiohttp.ClientSession] = session
 
     async def __aenter__(self):
-        self.session = aiohttp.ClientSession()
+        if self._external_session is None:
+            self.session = aiohttp.ClientSession()
+        else:
+            self.session = self._external_session
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
+        if self._external_session is None and self.session:
             await self.session.close()
 
     async def search_papers(
@@ -199,16 +203,20 @@ class DBLPAPI:
 
     BASE_URL = "https://dblp.org/search/publ/api"
 
-    def __init__(self):
+    def __init__(self, session: Optional[aiohttp.ClientSession] = None):
         """初始化客户端"""
-        self.session: Optional[aiohttp.ClientSession] = None
+        self._external_session = session
+        self.session: Optional[aiohttp.ClientSession] = session
 
     async def __aenter__(self):
-        self.session = aiohttp.ClientSession()
+        if self._external_session is None:
+            self.session = aiohttp.ClientSession()
+        else:
+            self.session = self._external_session
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
+        if self._external_session is None and self.session:
             await self.session.close()
 
     async def search_papers(
@@ -332,16 +340,20 @@ class EuropePMCAPI:
 
     BASE_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 
-    def __init__(self):
+    def __init__(self, session: Optional[aiohttp.ClientSession] = None):
         """初始化客户端"""
-        self.session: Optional[aiohttp.ClientSession] = None
+        self._external_session = session
+        self.session: Optional[aiohttp.ClientSession] = session
 
     async def __aenter__(self):
-        self.session = aiohttp.ClientSession()
+        if self._external_session is None:
+            self.session = aiohttp.ClientSession()
+        else:
+            self.session = self._external_session
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
+        if self._external_session is None and self.session:
             await self.session.close()
 
     async def search_papers(
@@ -494,22 +506,27 @@ class OpenAlexAPI:
         word_positions.sort(key=lambda x: x[0])
         return " ".join(w for _, w in word_positions)
 
-    def __init__(self, email: Optional[str] = None):
+    def __init__(self, email: Optional[str] = None, session: Optional[aiohttp.ClientSession] = None):
         """
         初始化客户端
 
         Args:
             email: 提供邮箱可以获得更高的速率限制（Polite Pool）
+            session: 外部共享的 aiohttp session（可选）
         """
         self.email = email
-        self.session: Optional[aiohttp.ClientSession] = None
+        self._external_session = session
+        self.session: Optional[aiohttp.ClientSession] = session
 
     async def __aenter__(self):
-        self.session = aiohttp.ClientSession()
+        if self._external_session is None:
+            self.session = aiohttp.ClientSession()
+        else:
+            self.session = self._external_session
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
+        if self._external_session is None and self.session:
             await self.session.close()
 
     async def search_papers(
@@ -665,7 +682,7 @@ async def search_all_databases(
     databases: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
-    从所有可用数据库搜索论文
+    从所有可用数据库并行搜索论文
 
     Args:
         query: 搜索查询
@@ -676,78 +693,70 @@ async def search_all_databases(
     Returns:
         合并后的论文列表
     """
+    from .api import ArxivAPI
+
     if databases is None:
         databases = ["arxiv", "pubmed", "dblp", "europe_pmc", "openalex"]
 
-    all_papers = []
-
-    # arXiv
-    if "arxiv" in databases:
+    async def _search_arxiv(session):
         try:
-            async with ArxivAPI() as api:
-                papers = await api.search_papers(
-                    query=query,
-                    max_results=max_results,
-                )
-                all_papers.extend(papers)
-                await asyncio.sleep(0.5)
+            async with ArxivAPI(session=session) as api:
+                return await api.search_papers(query=query, max_results=max_results)
         except Exception as e:
             logger.error(f"arXiv search failed: {e}")
+            return []
 
-    # PubMed
-    if "pubmed" in databases:
+    async def _search_pubmed(session):
         try:
-            async with PubMedAPI() as api:
-                papers = await api.search_papers(
-                    query=query,
-                    max_results=max_results,
-                    year_range=year_range,
-                )
-                all_papers.extend(papers)
-                await asyncio.sleep(0.5)
+            async with PubMedAPI(session=session) as api:
+                return await api.search_papers(query=query, max_results=max_results, year_range=year_range)
         except Exception as e:
             logger.error(f"PubMed search failed: {e}")
+            return []
 
-    # DBLP
-    if "dblp" in databases:
+    async def _search_dblp(session):
         try:
-            async with DBLPAPI() as api:
-                papers = await api.search_papers(
-                    query=query,
-                    max_results=max_results,
-                )
-                all_papers.extend(papers)
-                await asyncio.sleep(0.5)
+            async with DBLPAPI(session=session) as api:
+                return await api.search_papers(query=query, max_results=max_results)
         except Exception as e:
             logger.error(f"DBLP search failed: {e}")
+            return []
 
-    # Europe PMC
-    if "europe_pmc" in databases:
+    async def _search_europe_pmc(session):
         try:
-            async with EuropePMCAPI() as api:
-                papers = await api.search_papers(
-                    query=query,
-                    max_results=max_results,
-                    year_range=year_range,
-                )
-                all_papers.extend(papers)
-                await asyncio.sleep(0.5)
+            async with EuropePMCAPI(session=session) as api:
+                return await api.search_papers(query=query, max_results=max_results, year_range=year_range)
         except Exception as e:
             logger.error(f"Europe PMC search failed: {e}")
+            return []
 
-    # OpenAlex
-    if "openalex" in databases:
+    async def _search_openalex(session):
         try:
-            async with OpenAlexAPI() as api:
-                papers = await api.search_papers(
-                    query=query,
-                    max_results=max_results,
-                    year_range=year_range,
-                )
-                all_papers.extend(papers)
-                await asyncio.sleep(0.5)
+            async with OpenAlexAPI(session=session) as api:
+                return await api.search_papers(query=query, max_results=max_results, year_range=year_range)
         except Exception as e:
             logger.error(f"OpenAlex search failed: {e}")
+            return []
+
+    # 数据库搜索函数映射
+    db_searchers = {
+        "arxiv": _search_arxiv,
+        "pubmed": _search_pubmed,
+        "dblp": _search_dblp,
+        "europe_pmc": _search_europe_pmc,
+        "openalex": _search_openalex,
+    }
+
+    all_papers = []
+
+    async with aiohttp.ClientSession() as shared_session:
+        # 并行搜索所有目标数据库
+        tasks = [db_searchers[db](shared_session) for db in databases if db in db_searchers]
+        results = await asyncio.gather(*tasks)
+
+        for papers in results:
+            if isinstance(papers, list):
+                all_papers.extend(papers)
 
     logger.info(f"All databases search returned {len(all_papers)} total papers")
     return all_papers

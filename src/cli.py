@@ -42,7 +42,7 @@ class LiteratureReviewCLI:
         """
         self.workspace_path = workspace_path
         self.workspace = SharedWorkspace(workspace_path)
-        self.rq_manager = RQManager(workspace_path, workspace=self.workspace)
+        self.rq_manager = RQManager(workspace_path)
         self._initialized = False
         self._init_lock = asyncio.Lock()  # 并发锁保护
 
