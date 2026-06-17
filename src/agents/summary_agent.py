@@ -468,9 +468,11 @@ For each field's main challenge:
         lang_constraint: str = "",
     ) -> str:
         """
-        生成最终综述报告（拆分为四次LLM调用，避免单次输出被截断）
+        生成最终综述报告（合并为两次 LLM 调用）
 
-        每次调用只负责一个章节，大幅降低单次输出 token 量。
+        glm-5 上下文长度充足，无需拆成四次：
+          Stage 1/2: 引言 + 核心技术原理（每簇公式/推导/极限/定量对比）
+          Stage 2/2: 技术性能 + 代际演进/物理极限 + 根因分析 + 结论
 
         Args:
             rq_tree: RQ树
@@ -514,11 +516,14 @@ Wrong: [1] ← missing author, year, and title, not allowed
 Do NOT cite papers not listed in the cluster summaries above."""
 
         # ──────────────────────────────────────────────
-        # Part 1: 引言（输入完整摘要作为上下文，输出只需引言）
+        # glm-5 上下文长度充足，最终综述合并为 2 次 LLM 调用：
+        #   Stage 1/2: 引言 + 核心技术原理（每簇公式/推导/极限/定量对比）
+        #   Stage 2/2: 技术性能 + 代际演进/物理极限 + 根因分析 + 结论
         # ──────────────────────────────────────────────
-        part1_prompt = f"""{lang_constraint}
+        common_header = f"""{lang_constraint}
 
 You are a senior academic literature review expert with deep expertise in mathematical modeling and first-principles analysis.
+Your core principle: **Focus ONLY on underlying principles, core formulas, and mathematical derivations. Reject vague generalities.**
 
 Research Topic: {topic}
 Review Period: {year_range}
@@ -528,9 +533,12 @@ Number of Topic Clusters: {len(cluster_summaries)}
 Cluster Analysis Summaries (for context only — do NOT repeat these summaries, write original prose):
 {cluster_summaries_text}
 
-{_WRITING_RULES}
+{_WRITING_RULES}"""
 
-Please write ONLY Section 1 of the literature review:
+        # ── Stage 1/2: 引言 + 核心技术原理 ──
+        stage1_prompt = f"""{common_header}
+
+Please write ONLY Sections 1 and 2 of the literature review.
 
 ## 1. Introduction
 ### 1.1 Research Background and Core Challenges
@@ -538,34 +546,8 @@ Please write ONLY Section 1 of the literature review:
 ### 1.2 Scope of Review and Methodology
 (Describe the systematic review methodology, data sources, number of papers analyzed, and clustering approach)
 
-Write concisely — this section should be about 500-800 words. Do NOT write any other sections."""
-
-        self.log_progress("Generating report part 1/4: Introduction...")
-        messages_1 = [
-            SystemMessage(content="You are a senior academic literature review expert."),
-            HumanMessage(content=part1_prompt),
-        ]
-        part1 = await self._call_llm(messages_1)
-
-        # ──────────────────────────────────────────────
-        # Part 2: 核心技术原理（每个簇的方法论 + 公式）
-        # ──────────────────────────────────────────────
-        part2_prompt = f"""{lang_constraint}
-
-You are a senior academic literature review expert with deep expertise in mathematical modeling and first-principles analysis.
-Your core principle: **Focus ONLY on underlying principles, core formulas, and mathematical derivations.**
-
-Research Topic: {topic}
-Number of Topic Clusters: {len(cluster_summaries)}
-
-Cluster Analysis Summaries:
-{cluster_summaries_text}
-
-{_WRITING_RULES}
-
-Please write ONLY Section 2 of the literature review. Write a subsection (### 2.x Title) for EACH of the {len(cluster_summaries)} topic clusters.
-
 ## 2. Core Technology Principles
+Write a subsection (### 2.x Title) for EACH of the {len(cluster_summaries)} topic clusters.
 
 ### 2.x [Cluster Theme]
 #### 2.x.1 Core Formulas and Derivation
@@ -588,33 +570,19 @@ Please write ONLY Section 2 of the literature review. Write a subsection (### 2.
 | Method | Core Formula | Key Parameters | Metric Value (Reported) | Theoretical Limit (Derived) | Gap |
 |--------|-------------|----------------|------------------------|----------------------------|-----|
 
-Note: You MUST cover ALL {len(cluster_summaries)} topic clusters. Do not write any other sections."""
+Note: You MUST cover ALL {len(cluster_summaries)} topic clusters. Do NOT write any other sections."""
 
-        self.log_progress("Generating report part 2/4: Core Technology Principles...")
-        messages_2 = [
+        self.log_progress("Generating report stage 1/2: Introduction + Core Technology Principles...")
+        messages_1 = [
             SystemMessage(content="You are a senior academic literature review expert."),
-            HumanMessage(content=part2_prompt),
+            HumanMessage(content=stage1_prompt),
         ]
-        part2 = await self._call_llm(messages_2)
+        stage1 = await self._call_llm(messages_1)
 
-        # ──────────────────────────────────────────────
-        # Part 3: 应用场景 + 技术演进
-        # ──────────────────────────────────────────────
-        part3_prompt = f"""{lang_constraint}
+        # ── Stage 2/2: 技术性能 + 代际演进/物理极限 + 根因分析 + 结论 ──
+        stage2_prompt = f"""{common_header}
 
-You are a senior academic literature review expert with deep expertise in mathematical modeling and first-principles analysis.
-Core principle: **Focus on underlying formulas, physical mechanisms, and mathematical derivations.**
-
-Research Topic: {topic}
-Review Period: {year_range}
-Total Papers Analyzed: {total_papers}
-
-Cluster Analysis Summaries:
-{cluster_summaries_text}
-
-{_WRITING_RULES}
-
-Please write ONLY Sections 3 and 4 of the literature review:
+Please write ONLY Sections 3, 4, 5 and 6 of the literature review.
 
 ## 3. Technical Performance in Practice
 Categorize by application scenario. Each scenario MUST include:
@@ -644,32 +612,6 @@ When importing methods from other domains:
 - Compare the core formulas: are the mathematical structures compatible?
 - List the specific conditions (parameter ranges, assumptions) for transfer validity
 - What formula modifications are needed? What new terms must be added?
-
-Do not write any other sections."""
-
-        self.log_progress("Generating report part 3/4: Applications + Evolution...")
-        messages_3 = [
-            SystemMessage(content="You are a senior academic literature review expert."),
-            HumanMessage(content=part3_prompt),
-        ]
-        part3 = await self._call_llm(messages_3)
-
-        # ──────────────────────────────────────────────
-        # Part 4: 根因分析 + 结论
-        # ──────────────────────────────────────────────
-        part4_prompt = f"""{lang_constraint}
-
-You are a senior academic literature review expert with deep expertise in mathematical modeling and first-principles analysis.
-Core principle: **Focus on underlying formulas, physical mechanisms, and mathematical derivations.**
-
-Research Topic: {topic}
-
-Cluster Analysis Summaries:
-{cluster_summaries_text}
-
-{_WRITING_RULES}
-
-Please write ONLY Sections 5 and 6 of the literature review:
 
 ## 5. Root Cause Analysis and Breakthrough Paths
 ### 5.1 Formula-Level Root Causes of Core Bottlenecks
@@ -704,17 +646,17 @@ Requirements:
 - Avoid hollow statements like "this method has broad prospects" or "this field has great potential"
 - Write as a technical report for domain experts, emphasizing formulas, derivations, and numerical values
 
-Do not write any other sections."""
+Do NOT write any other sections."""
 
-        self.log_progress("Generating report part 4/4: Root Causes + Conclusion...")
-        messages_4 = [
+        self.log_progress("Generating report stage 2/2: Performance + Evolution + Root Causes + Conclusion...")
+        messages_2 = [
             SystemMessage(content="You are a senior academic literature review expert."),
-            HumanMessage(content=part4_prompt),
+            HumanMessage(content=stage2_prompt),
         ]
-        part4 = await self._call_llm(messages_4)
+        stage2 = await self._call_llm(messages_2)
 
         # 组合完整报告
-        return f"{part1}\n\n{part2}\n\n{part3}\n\n{part4}"
+        return f"{stage1}\n\n{stage2}"
 
     def _fallback_report(
         self,

@@ -179,10 +179,15 @@ async def get_embeddings(
             return all_embeddings
 
         except Exception as e:
+            # 不再静默返回零向量：零向量经归一化后与任意查询的余弦相似度恒为 0，
+            # 会让这批论文在 Screen 阶段被全部自动拒绝、在 Cluster 阶段被归为噪声，
+            # 而用户毫无察觉。改为显式抛错，由上层 Agent 决定降级/重试。
             logger.error(f"Failed to generate embeddings with local model: {e}")
-            # 返回零向量
-            zero_embedding = [0.0] * 768  # 大多数本地模型是768维
-            return [zero_embedding] * len(texts)
+            raise RuntimeError(
+                f"Embedding generation failed for {len(texts)} texts: {e}. "
+                f"Refusing to return zero vectors (would silently corrupt "
+                f"screening/clustering)."
+            ) from e
 
     else:
         # 使用远程API (GLM/OpenAI等)
@@ -204,13 +209,12 @@ async def get_embeddings(
                 all_embeddings.extend(embeddings)
                 logger.info(f"Generated embeddings for batch {i//batch_size + 1} ({len(batch)} texts)")
             except Exception as e:
-                logger.error(f"Failed to generate embeddings for batch: {e}")
-                # 返回零向量作为fallback
-                if model == "embedding-3":
-                    zero_embedding = [0.0] * 1024
-                else:
-                    zero_embedding = [0.0] * 1536
-                all_embeddings.extend([zero_embedding] * len(batch))
+                # 远程 API 单批次失败也不再静默补零，原因同本地模型分支
+                logger.error(f"Failed to generate embeddings for batch {i//batch_size + 1}: {e}")
+                raise RuntimeError(
+                    f"Remote embedding failed for batch {i//batch_size + 1} "
+                    f"({len(batch)} texts): {e}"
+                ) from e
 
         logger.info(f"get_embeddings completed: {len(all_embeddings)} embeddings total")
         return all_embeddings

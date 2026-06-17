@@ -89,8 +89,10 @@ class LiteratureRecord:
         return cls(**data)
 
     def __hash__(self) -> int:
+        # __hash__ 必须返回 int；返回 str 会导致 hash(rec) 抛 TypeError。
+        # 这里用内容的稳定 md5 转成 int，保证跨进程确定性（区别于内建 hash() 的随机化）。
         content = f"{self.title}{self.authors}{self.year}".lower()
-        return hashlib.md5(content.encode()).hexdigest()
+        return int(hashlib.md5(content.encode()).hexdigest(), 16) % (2**61 - 1)
 
 
 @dataclass
@@ -487,7 +489,10 @@ class SharedWorkspace:
             rows = []
             for rec in records:
                 if not rec.id:
-                    rec.id = str(hash(rec))
+                    # 用内容生成稳定 ID（md5），避免内建 hash() 跨进程不可复现
+                    rec.id = "auto_" + hashlib.md5(
+                        f"{rec.title}{rec.authors}{rec.year}".lower().encode()
+                    ).hexdigest()[:16]
                 rows.append([
                     json.dumps(getattr(rec, c), ensure_ascii=False) if c in _json_cols else getattr(rec, c)
                     for c in _LIT_COLUMNS
@@ -550,10 +555,11 @@ class SharedWorkspace:
             sets.append("updated_at = datetime('now')")
             vals.append(paper_id)
             with self._conn:
-                self._conn.execute(
+                cur = self._conn.execute(
                     f"UPDATE literature SET {','.join(sets)} WHERE id = ?", vals
                 )
-            return self._conn.changes > 0
+            # NOTE: sqlite3.Connection 没有 .changes 属性，必须用游标的 rowcount
+            return cur.rowcount > 0
 
         return await asyncio.to_thread(_update)
 
@@ -562,11 +568,12 @@ class SharedWorkspace:
         def _delete():
             ph = ",".join(["?"] * len(paper_ids))
             with self._conn:
-                self._conn.execute(
+                cur = self._conn.execute(
                     f"DELETE FROM literature WHERE id IN ({ph})",
                     paper_ids,
                 )
-            return self._conn.changes
+            # NOTE: sqlite3.Connection 没有 .changes 属性，必须用游标的 rowcount
+            return cur.rowcount
 
         return await asyncio.to_thread(_delete)
 
@@ -850,10 +857,24 @@ class SharedWorkspace:
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         def _copy():
+            # WAL 模式下，最近写入可能仍滞留在 research.db-wal 中尚未合并进主库；
+            # 若只复制 research.db，快照会缺失最新数据（恢复后计数为 0）。
+            # 先强制 checkpoint(TRUNCATE) 把 WAL 刷入主库，再做文件级复制。
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception as e:
+                logger.warning(f"WAL checkpoint before snapshot failed: {e}")
+
             db_src = self.base_path / "research.db"
             db_dst = checkpoint_dir / "research.db"
             if db_src.exists():
                 shutil.copy2(str(db_src), str(db_dst))
+            # 若仍有残余 WAL（极端情况下 checkpoint 未完全清空），一并复制以保证一致
+            for suffix in ("-wal", "-shm"):
+                extra_src = self.base_path / f"research.db{suffix}"
+                if extra_src.exists() and extra_src.stat().st_size > 0:
+                    shutil.copy2(str(extra_src), str(checkpoint_dir / f"research.db{suffix}"))
+
             reports_src = self.base_path / "reports"
             if reports_src.exists():
                 reports_dst = checkpoint_dir / "reports"

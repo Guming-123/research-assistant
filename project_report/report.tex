@@ -1,0 +1,526 @@
+% !TEX program = xelatex
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[fontset=windows]{ctex}
+\usepackage{amsmath}
+\usepackage[margin=1.8cm,top=1.6cm,bottom=1.8cm]{geometry}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{tcolorbox}
+\usepackage{caption}
+
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue!60!black,citecolor=blue!60!black}
+
+% --- 页眉页脚 ---
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{gray} research\_assistant 项目报告}
+\fancyhead[R]{\small\color{gray} \thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% --- 标题样式 ---
+\titleformat{\section}{\large\bfseries\color{blue!40!black}}{第\thesection 章}{0.6em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{blue!30!black}}{\thesubsection}{0.5em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{\thesubsubsection}{0.4em}{}
+\titlespacing*{\section}{0pt}{1.0ex}{0.5ex}
+\titlespacing*{\subsection}{0pt}{0.8ex}{0.3ex}
+
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.25em}
+
+\definecolor{codebg}{RGB}{246,248,250}
+\definecolor{codekw}{RGB}{200,40,40}
+\definecolor{codecm}{RGB}{110,130,90}
+\lstset{
+  basicstyle=\ttfamily\scriptsize,
+  backgroundcolor=\color{codebg},
+  keywordstyle=\color{codekw},
+  commentstyle=\color{codecm}\itshape,
+  showstringspaces=false,
+  breaklines=true,
+  frame=single,
+  framerule=0pt,
+  framesep=2pt,
+  xleftmargin=4pt,
+  aboveskip=2pt,belowskip=2pt,
+  literate={→}{{$\rightarrow$}}1 {≤}{{$\leq$}}1 {≥}{{$\geq$}}1
+}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\begin{document}
+
+% ===================== 封面 =====================
+\begin{titlepage}
+\centering
+\vspace*{2.2cm}
+{\Huge\bfseries research\_assistant\\[0.3em] 项目报告}\\[0.4em]
+{\large\color{gray} 基于 Agent 协作的自动化文献综述系统}\\[2.4cm]
+\begin{tabular}{rl}
+\textbf{项目名称：} & Multi-Agent Literature Review System \\
+\textbf{版本：} & 1.0.0（MIT License）\\
+\textbf{方法依据：} & IEEE Access 2025《AI-Augmented Literature Reviews》 \\
+\textbf{代码规模：} & 源码约 9{,}499 行 / 测试 835 行（Python 3.10+） \\
+\textbf{技术栈：} & LangChain · asyncio · PyTorch(CUDA) · HDBSCAN · SQLite · Gradio \\
+\textbf{测试状态：} & 38 项全部通过 \\
+\textbf{报告日期：} & 2026-06-15 \\
+\end{tabular}
+\vfill
+{\small\color{gray} 本报告正文不超过 10 页，附录页数不限。}
+\end{titlepage}
+
+% ===================== 摘要 =====================
+\noindent\begin{tcolorbox}[colback=blue!4,colframe=blue!40!black,boxrule=0.4pt,arc=2pt,title=\textbf{摘要}]
+\setlength{\parindent}{2em}
+research\_assistant 是一套基于「协调者—Agent」协作架构的\textbf{自动化文献综述系统}。
+用户只需输入一个研究主题，系统即可自动完成\textbf{多源文献检索、相关性筛选、语义聚类与结构化综述生成}四个阶段，
+输出聚焦\textbf{底层原理、公式推导与量化分析}的综述报告。系统集成 arXiv、PubMed、DBLP、Europe PMC、OpenAlex
+五个免费学术数据库，以层级研究问题（Research Question, RQ）树驱动整个筛选—聚类—综述流程，
+并采用本地 BGE 嵌入模型（可选 GPU 加速）与 HDBSCAN 语义聚类发现研究主题。
+
+系统在工程层面具备完整的能力闭环：基于 SQLite 的共享工作区支持多主题数据隔离与检查点/回滚；
+全局信号量与指数退避保障 LLM 并发稳定；反幻觉提示词工程强制要求公式级分析与精确引用；
+Gradio Web 界面与命令行两种交互方式。当前测试套件 38 项全部通过，覆盖工作区、RQ 管理、聚类与集成流程。
+本报告阐述项目目标、系统架构、四阶段流水线实现、关键技术、测试与使用方式，并讨论局限与未来工作。
+\end{tcolorbox}
+
+% ====================================================================
+\section{项目目标与背景}
+
+\subsection{研究背景}
+文献综述是科研工作的基础环节，但传统流程高度依赖人工：检索多源数据库、去重、初筛、归类、归纳写作，
+面对动辄数百篇的候选文献时极为耗时。近年大语言模型（LLM）与语义嵌入技术的发展，
+为「检索—筛选—聚类—综述」的自动化提供了可能。本项目依据 IEEE Access 2025 论文
+《AI-Augmented Literature Reviews: Efficient Clustering and Summarization for Researchers》的方法论，
+设计并实现一套可端到端运行的自动化文献综述系统。
+
+\subsection{设计目标}
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.1em]
+  \item \textbf{端到端自动化：} 输入研究主题，自动产出结构化综述报告，覆盖检索到写作全流程；
+  \item \textbf{聚焦底层原理：} 综述强制要求公式解读、推导链条、第一性原理理论极限与定量对比，
+        而非方法名罗列或空泛评价；
+  \item \textbf{反幻觉保障：} 强制 \texttt{[作者, 年份, 论文标题]} 引用格式，禁止引用列表外文献，并附正/误对照；
+  \item \textbf{工程可复用：} 模块化 Agent 架构、SQLite 持久化、多主题隔离、检查点恢复，支持反复迭代；
+  \item \textbf{零成本数据源：} 仅集成免费、无需 API Key 的学术数据库。
+\end{enumerate}
+
+\subsection{典型工作流}
+系统接收任意研究主题后，按四阶段流水线处理：
+\begin{center}
+\begin{tcolorbox}[colback=gray!6,colframe=gray!50,boxrule=0.3pt,arc=2pt]
+\small\ttfamily
+用户输入研究主题\\
+\ \ $\downarrow$\\
+Coordinator（协调者：任务调度 · 状态管理 · 四级质量门控 · 检查点）\\
+\ \ $\downarrow$ \hspace{6em} $\downarrow$ \hspace{5em} $\downarrow$ \hspace{5em} $\downarrow$\\
+Search Agent $\rightarrow$ Screen Agent $\rightarrow$ Cluster Agent $\rightarrow$ Summary Agent\\
+\ \ 多源检索\ \ \ \ \ \ \ 相关性筛选\ \ \ \ \ \ \ \ 语义聚类\ \ \ \ \ \ \ \ \ 综述生成\\
+\ \ $\downarrow$\\
+SharedWorkspace（SQLite：文献库 · 嵌入 · 聚类 · 摘要 · 报告）
+\end{tcolorbox}
+\end{center}
+
+% ====================================================================
+\section{系统架构}
+
+\subsection{整体架构：Coordinator–Agent 协作}
+系统采用「协调者 + 专业 Agent」的分层架构。\texttt{Coordinator}（自身继承 \texttt{BaseAgent}）负责
+阶段调度、四级质量门控（Quality Gate）、检查点创建/恢复与回滚；四个专业 Agent 顺序消费共享工作区
+\texttt{SharedWorkspace}，各司其职：
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{lYY}
+\toprule
+\textbf{Agent} & \textbf{职责} & \textbf{核心技术} \\
+\midrule
+Search  & 多源并行检索、标题标准化去重、元数据规整 & arXiv/PubMed/DBLP/Europe PMC/OpenAlex，aiohttp 异步 \\
+Screen  & 论文级余弦相似度 + LLM 边界判定，三级筛选 & BGE/MiniLM 本地嵌入，NumPy 矩阵运算，全局信号量 \\
+Cluster & 仅对相关论文降维 + HDBSCAN 聚类、簇标签生成 & 两步降维（PCA$\rightarrow$t-SNE），HDBSCAN，并行打标 \\
+Summary & 簇摘要 + 两段式综述，反幻觉提示词 & 分阶段 LLM 调用、强制引用格式、fallback 报告 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{BaseAgent：模板方法基类}
+所有 Agent 继承抽象基类 \texttt{BaseAgent}，遵循\textbf{模板方法模式}：基类封装通用能力，
+子类只需实现 \texttt{execute()} 与 \texttt{validate\_input()}。基类提供的通用能力包括：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.05em]
+  \item \textbf{LLM 调用封装}：\textbf{按阶段信号量}控制并发（glm-4-flash 阶段=15，glm-5 阶段=3），叠加指数退避重试
+        （针对 429/503/超时），并对 JSON 解析错误、连接错误分类处理；
+  \item \textbf{统一结果与异常}：\texttt{AgentResult} 标准化成功/数据/错误/指标；
+        \texttt{run()} 统一包裹校验与异常捕获，并将 \texttt{KeyboardInterrupt} 一路向上重抛以支持优雅中断；
+  \item \textbf{工作区访问与日志}：统一的 \texttt{save/load}、阶段化日志。
+\end{itemize}
+
+\subsection{SharedWorkspace：SQLite 共享工作区}
+工作区基于 SQLite，采用「全局共享 + 主题隔离」的数据组织：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.05em]
+  \item \texttt{literature} 与 \texttt{embeddings} 表\textbf{全局共享}，按论文 ID 去重复用——同一篇论文在不同主题综述间只存一份；
+  \item \texttt{clusters}、\texttt{summaries}、\texttt{workspace\_metadata} 三表以 \texttt{research\_topic} 列\textbf{按主题隔离}，支持多主题并存与切换；
+  \item 性能调优：WAL 模式 + \texttt{synchronous=NORMAL} + 64\,MB 页缓存 + 256\,MB 内存映射 I/O + 30\,s 锁等待等 6 项 PRAGMA；
+  \item 内置 schema 迁移（旧 \texttt{topic\_id} 版本 $\rightarrow$ 全局版本）与 JSON$\rightarrow$SQLite 迁移；
+  \item 检查点/恢复：创建快照前先执行 \texttt{PRAGMA wal\_checkpoint(TRUNCATE)} 刷盘，
+        再复制 \texttt{research.db} 与 \texttt{reports/}，保证快照完整。
+\end{itemize}
+
+\subsection{层级研究问题（RQ）树}
+\texttt{RQManager} 为每个研究主题自动生成\textbf{三级 RQ 树}，作为筛选—聚类—综述的语义骨架：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.05em]
+  \item \textbf{一级（宏观维度）：} 方法论 RQ1、应用 RQ2、趋势 RQ3；
+  \item \textbf{二级（中观分析）：} 方法类型、原理对比、应用领域、领域挑战、演进、未来方向等；
+  \item \textbf{三级（微观深入）：} 核心数学公式与推导、第一性原理理论极限、模型假设与有效性边界。
+\end{itemize}
+每个 RQ 携带完整主题上下文与关键词，用于驱动相似度计算与提示词生成，确保下游各阶段的语义匹配精度。
+
+% ====================================================================
+\section{四阶段流水线实现}
+
+\subsection{Search Agent —— 多源文献检索}
+\begin{itemize}[leftmargin=2.2em,itemsep=0.08em]
+  \item \textbf{查询构建：} 调用 LLM 生成 8–10 条领域限定的关键词组合查询（明确禁止 SQL/布尔语法，
+        以适配各数据库）；LLM 失败时回退到基于主题分词的默认查询策略。
+  \item \textbf{并行检索：} 对每条查询，\textbf{同一查询的多数据库并行、查询间串行}，复用共享 \texttt{aiohttp.ClientSession}；
+        任一数据库失败不影响其它库，单库异常独立捕获并记录。
+  \item \textbf{去重与标准化：} 标题转小写、去标点后作为唯一键去重；统一映射为 \texttt{LiteratureRecord}
+        （id/title/authors/abstract/year/source/url/doi/venue/citation\_count 等）。
+  \item \textbf{会话隔离：} 记录本次搜索的论文 ID 列表（\texttt{current\_search\_paper\_ids}），
+        供后续 Screen/Cluster 阶段限定范围，避免旧主题残留论文混入。
+\end{itemize}
+
+\subsection{Screen Agent —— 三级相关性筛选}
+采用「\textbf{论文级余弦相似度 + LLM 边界判定}」的递进策略，替代逐 chunk 检索：
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.05em]
+  \item \textbf{相似度矩阵：} 将全部候选论文（标题+摘要）与一级 RQ 问题分别嵌入，
+        NumPy 向量化计算余弦相似度矩阵，每篇论文取跨所有 RQ 的\textbf{最大相似度}作为初始分。
+  \item \textbf{三级分流（阈值 0.64 / 0.71）：}
+        \begin{itemize}[leftmargin=1.5em,itemsep=0.02em]
+          \item $\geq 0.71$：自动通过，不调用 LLM；
+          \item $[0.64, 0.71)$：边界区间，按分数降序取\textbf{前 50 篇}送 LLM(glm-4-flash) 逐篇判定，\textbf{第 51+ 名排除}；
+          \item $< 0.64$：自动拒绝。
+        \end{itemize}
+  \item \textbf{LLM 判定与公式校验：} LLM 从主题相关性、方法相关性、时效性三维度（1–5 分）评分，
+        系统按 $\text{score}=0.5\cdot\text{topic}+0.3\cdot\text{method}+0.2\cdot\text{timeliness}$ \textbf{独立复核}
+        LLM 的 \texttt{relevant} 判定（$\geq 3.0$ 才算相关），避免 LLM 主观偏差。
+  \item \textbf{批量落库：} 仅对本次搜索的论文批量更新 \texttt{relevance\_score}，不触碰其它主题数据。
+\end{enumerate}
+
+\subsection{Cluster Agent —— 高维语义聚类}
+仅对通过筛选的相关论文聚类，发现研究主题结构：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.08em]
+  \item \textbf{聚类空间与可视化空间分离：} HDBSCAN 在\textbf{高维}（PCA 自适应降到 10–50 维，随样本量）空间上聚类；
+        t-SNE 的 2D 投影\textbf{仅用于散点图可视化}。避免在 2D 上聚类导致密度被扭曲、退化为少数大簇或全部判为噪声。
+  \item \textbf{自适应聚类参数：} \texttt{min\_cluster\_size} 默认 6，样本少时（$<200$）自动按 $n/15$ 调小（下限 3），
+        \texttt{min\_samples} 同步降至 2–3，避免高维稀疏下 HDBSCAN 把所有点判为噪声（出现 0 簇）。
+  \item \textbf{回退方案：} HDBSCAN 缺失时回退 KMeans 或基于距离阈值的层次聚类。
+  \item \textbf{簇标签生成：} LLM(glm-4-flash) \textbf{并行}为每个簇生成标签、核心主题、代表性论文、子主题与共享公式/原理。
+  \item \textbf{领域一致性过滤：} 计算每簇论文 embedding 与研究主题的平均余弦相似度，
+        低于 0.45 的离题簇被移除（回退到关键词匹配，匹配率 $<30\%$ 移除）。
+  \item \textbf{质量评估：} 轮廓系数（在聚类空间高维上计算）、Davies-Bouldin 指数、噪声点统计；并保存 2D 坐标供 Web 可视化。
+\end{itemize}
+
+\subsection{Summary Agent —— 反幻觉综述生成}
+\begin{itemize}[leftmargin=2.2em,itemsep=0.08em]
+  \item \textbf{按簇提取内容：} 每簇取至多 10 篇代表性论文（标题/作者/年份/摘要片段）。
+  \item \textbf{簇级并行分析：} 对每个簇并行生成「方法论分析」与「应用分析」两段（含公式、推导、定量对比表）。
+  \item \textbf{两段式最终报告（glm-5）：} 借助 glm-5 的大上下文，最终综述合并为\textbf{两次} LLM 调用——
+        \textcircled{1} 引言 + 核心技术原理（逐簇公式+推导+定量对比）；
+        \textcircled{2} 技术性能 + 代际演进/物理极限 + 根因分析/突破路径 + 结论。\texttt{max\_tokens=32768}。
+  \item \textbf{反幻觉提示词：} 强制 \texttt{[作者, 年份, 论文标题]} 引用并附正/误对照；
+        禁止「取得了较好效果」类空泛表述；要求每个结论可追溯到具体公式或物理定律；禁止编造数据。
+  \item \textbf{双重保障：} \textbf{始终}先生成模板 fallback 报告，再尝试 LLM 报告（最多 3 次重试）；
+        全部失败时自动降级为 fallback，确保流程总有产出。
+  \item \textbf{语言自适应：} 依据研究主题语种切换中/英文语言硬约束指令，避免中英混排。
+\end{itemize}
+
+% ====================================================================
+\section{关键技术与工程实践}
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{lYY}
+\toprule
+\textbf{方面} & \textbf{技术} & \textbf{说明} \\
+\midrule
+LLM 框架   & LangChain + langchain-openai & glm-5（Search/Summary）+ glm-4-flash（Screen/Cluster），走 GLM Coding 端点 \\
+并发控制   & 按阶段 asyncio.Semaphore      & glm-4-flash 阶段=15，glm-5 阶段=3；叠加指数退避重试 \\
+文本嵌入   & BGE-small-zh-v1.5（本地）     & 512 维，可选 all-MiniLM-L6-v2 / 远程 embedding-3 \\
+GPU 加速   & PyTorch CUDA                  & 嵌入推理与 PCA 降维，不可用时自动 CPU 回退 \\
+降维/聚类  & scikit-learn + HDBSCAN        & 高维（PCA 自适应 10–50）聚类，2D(t-SNE) 仅可视化；HDBSCAN 主，KMeans/距离法回退 \\
+向量检索   & FAISS（含 NumPy 回退）        & 优先 faiss-gpu/cpu，缺失时纯 NumPy 余弦检索 \\
+持久化     & SQLite（WAL）                 & 6 项 PRAGMA 调优、schema 迁移、检查点/恢复（WAL 刷盘后再快照） \\
+Web 界面   & Gradio                        & 5 个 Tab：综述/论文库/聚类可视化/报告/系统状态 \\
+配置       & YAML + 环境变量               & 全局 \texttt{config.yaml} + \texttt{.env} 覆盖 + Agent 级参数 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\textbf{工程化要点：}
+\begin{itemize}[leftmargin=2.2em,itemsep=0.05em]
+  \item \textbf{分层配置：} YAML 全局配置 $\rightarrow$ 环境变量覆盖 $\rightarrow$ Agent 级独立参数（各 Agent 独立 model/temperature/max\_tokens）。
+  \item \textbf{结构化日志：} 每阶段输出论文数量、分数分布（min/p25/median/p75/max）、耗时、噪声点等关键指标。
+  \item \textbf{优雅中断：} \texttt{KeyboardInterrupt} 在 Agent 与 Coordinator 层级均被重抛，支持用户安全中止长任务。
+  \item \textbf{安全实践：} 全部 SQL 使用参数化占位符（无注入面）；\texttt{.env} 已被 \texttt{.gitignore} 忽略，仓库不携带真实密钥。
+\end{itemize}
+
+% ====================================================================
+\section{测试与质量评估}
+
+\subsection{测试套件}
+项目附带 \texttt{pytest} 测试套件，覆盖工作区、RQ 管理、各 Agent 与端到端集成流程。
+在完整依赖环境（Python 3.10.20）下执行结果：
+
+\begin{center}\small
+\begin{tabular}{lr|lr}
+\toprule
+测试总数 & 38 & 语句覆盖率（src） & 26\% \\
+通过 & \textbf{38} & workspace.py 覆盖 & 61\% \\
+失败 & \textbf{0} & rq\_manager.py 覆盖 & 78\% \\
+通过率 & 100\% & web\_ui 覆盖 & 0\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+测试聚焦于数据层与核心逻辑（工作区 CRUD、检查点恢复、RQ 树生成/导出、聚类降维、集成持久化），
+均使用 Mock 屏蔽 LLM/网络，可在无 API Key 环境下离线运行。核心数据层（workspace 61\%、rq\_manager 78\%）覆盖较好；
+web\_ui 与部分 API 解析器覆盖偏低，是后续补强的方向（详见第 7 章）。
+
+\subsection{质量保障机制}
+除单元测试外，系统在运行时内置多层质量保障：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.05em]
+  \item \textbf{四级质量门控：} 搜索/筛选/聚类/综述后各设一道门控，自动模式下自动放行，亦支持注册人工审核回调；
+  \item \textbf{检查点/回滚：} 初始化与各阶段均可快照，流程中断可从检查点恢复；
+  \item \textbf{反幻觉与降级：} 强制引用格式 + 公式级要求 + 始终可用的 fallback 报告；
+  \item \textbf{独立结果校验：} Screen 阶段对 LLM 的 \texttt{relevant} 判定按公式独立复核，抑制主观偏差。
+\end{itemize}
+
+% ====================================================================
+\section{使用方式}
+
+\subsection{命令行（CLI）}
+\begin{lstlisting}[language=bash]
+# 完整流水线（推荐，较快）
+python main.py --topic "subthreshold swing reduction in transistors" --full
+
+# 单独执行某一阶段
+python main.py --topic "deep learning" --search --max-results 100
+python main.py --screen
+python main.py --cluster
+python main.py --summarize
+
+# 查看状态
+python main.py --status | --list-papers | --list-clusters
+\end{lstlisting}
+
+\subsection{Web 界面（Gradio）}
+\begin{lstlisting}[language=bash]
+python run_web.py     # 浏览器打开 http://localhost:7860
+\end{lstlisting}
+\begin{center}\small
+\begin{tabularx}{\linewidth}{lY}
+\toprule
+\textbf{Tab} & \textbf{功能} \\
+\midrule
+新建综述       & 输入主题、年份范围、结果数，执行全流程或单阶段，实时进度与日志 \\
+论文库         & 浏览/检索/按来源与相关度筛选已检索论文，查看详情 \\
+聚类可视化     & t-SNE 2D 散点图展示论文聚类，查看簇描述与代表论文 \\
+综述报告       & 列出并预览生成的 Markdown 综述，支持下载 \\
+系统状态       & 工作区统计、RQ 树、多 Topic 管理与检查点历史 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{作为 Python 模块调用}
+系统各组件（\texttt{Coordinator}、\texttt{SharedWorkspace}、\texttt{RQManager}、四个 Agent）
+均可独立实例化与组合，便于嵌入到其它研究流程中（示例见附录 D）。
+
+% ====================================================================
+\section{局限与未来工作}
+
+\begin{enumerate}[leftmargin=2.2em,itemsep=0.1em]
+  \item \textbf{向量检索后端：} 当前环境未安装 \texttt{faiss}，运行时恒走 NumPy 回退；
+        对万级以上论文库，安装 \texttt{faiss-cpu/gpu} 可显著提升检索吞吐。
+  \item \textbf{测试覆盖：} 整体覆盖率约 26\%，web\_ui 为 0\%、API 解析器偏低；
+        后续应补 Web handlers、各数据库解析器与端到端冒烟测试，目标提升至 60\%+。
+  \item \textbf{Web 并发：} 采用模块级全局状态与单一共享工作区，适合单机单用户；
+        多用户场景需引入会话隔离与并发队列。
+  \item \textbf{配置单一事实源：} 部分阈值默认值散落于 Agent 形参与 \texttt{ScreenConfig}，
+        与 \texttt{config.yaml} 存在历史漂移，应统一以配置文件为准。
+  \item \textbf{Screen 精筛路径：} 两阶段精筛（\texttt{refinement\_model}）已配置但尚未接入主流程，
+        可择机启用以进一步提升边界论文判定质量。
+  \item \textbf{PDF 全文利用：} 当前综述主要基于标题+摘要；已内置 PDF 抽取工具，
+        可扩展为下载并分块检索全文，支撑更深入的公式级分析。
+\end{enumerate}
+
+% ====================================================================
+\section{结论}
+research\_assistant 实现了一套从研究主题到结构化综述报告的\textbf{端到端自动化流水线}，
+核心价值在于：（1）协调者—Agent 分层架构带来的清晰职责与可扩展性；
+（2）三级筛选 + HDBSCAN 聚类的「相关论文发现」能力；（3）以反幻觉提示词工程保障综述的
+\textbf{公式级深度与引用准确性}；（4）SQLite 工作区、检查点恢复、多主题隔离等扎实的工程基础。
+
+系统当前测试全部通过，具备可重复运行的稳定基线，适合作为科研文献调研的辅助工具，
+也为后续在全文利用、并发服务化与更高测试覆盖等方向上的扩展提供了良好起点。
+
+\clearpage
+
+% ====================================================================
+% ============================ 附录 ==================================
+% ====================================================================
+\appendix
+\setcounter{page}{1}
+\renewcommand{\thepage}{A\arabic{page}}
+\fancyhead[R]{\small\color{gray} 附录 \thepage}
+
+\section{项目目录结构}
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+research_assistant/
+├── main.py                  # CLI 入口
+├── run_web.py               # Web UI 入口 (Gradio)
+├── config.yaml              # 系统配置
+├── .env.example             # 环境变量模板（.env 已被 gitignore）
+├── pyproject.toml           # 项目元数据与依赖
+├── requirements.txt         # 核心依赖
+├── requirements_gpu.txt     # GPU 加速依赖
+├── src/
+│   ├── cli.py               # 命令行界面
+│   ├── config/__init__.py   # 配置加载器 (YAML + 环境变量)
+│   ├── core/
+│   │   ├── agent.py         # BaseAgent 基类 (LLM 信号量/重试)
+│   │   ├── coordinator.py   # 协调者 (流水线编排 + 质量门控)
+│   │   ├── workspace.py     # SQLite 共享工作区
+│   │   └── rq_manager.py    # 层级研究问题管理
+│   ├── agents/
+│   │   ├── search_agent.py  # 多源检索 + 去重
+│   │   ├── screen_agent.py  # 余弦相似度 + LLM 三级筛选
+│   │   ├── cluster_agent.py # 降维 + HDBSCAN 聚类
+│   │   └── summary_agent.py # 两段式综述生成
+│   ├── utils/               # llm / embedding / api / api_extended / pdf / text / exceptions
+│   └── web_ui/              # app / handlers / views (Gradio 五 Tab)
+├── tests/                   # test_workspace / test_agents / test_rq_manager / test_integration
+├── workspace/               # 运行时数据（research.db、reports、checkpoints）
+└── latex/                   # 配套论文 LaTeX 源文件
+\end{lstlisting}
+
+\section{核心配置项（config.yaml）}
+\begin{center}\footnotesize
+\begin{tabularx}{\linewidth}{lYl}
+\toprule
+\textbf{配置项} & \textbf{含义} & \textbf{默认值} \\
+\midrule
+llm.default\_model        & 默认 LLM 模型 & glm-5 \\
+llm.default\_max\_tokens  & LLM 最大输出 token & 8000 \\
+embedding.model           & 嵌入模型 & local-zh（BGE-small-zh-v1.5，512 维） \\
+agents.search.model       & Search 模型 & glm-5 \\
+agents.screen.model       & Screen 模型 & glm-4-flash \\
+agents.cluster.model      & Cluster 模型 & glm-4-flash \\
+agents.summary.model      & Summary 模型 & glm-5 \\
+agents.screen.default\_nf\_threshold & NF 过滤门槛 & 0.64 \\
+agents.screen.auto\_approve\_threshold & 自动通过阈值（$\geq$ 此值） & 0.71 \\
+agents.screen.auto\_reject\_threshold  & 自动拒绝阈值（$<$ 此值） & 0.64 \\
+clustering.min\_cluster\_size & HDBSCAN 最小簇大小 & 6（自适应，小样本降至 3） \\
+clustering.min\_samples       & HDBSCAN min\_samples & 3（自适应，小样本降至 2） \\
+agents.summary.max\_tokens    & 综述最大输出 token & 32768 \\
+search.default\_max\_results & 每次检索最大结果数 & 200 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{支持的学术数据库}
+\begin{center}\footnotesize
+\begin{tabularx}{\linewidth}{lYY}
+\toprule
+\textbf{数据库} & \textbf{领域} & \textbf{说明} \\
+\midrule
+arXiv      & 计算机、物理、数学   & 免费，无需 API Key；提供摘要 \\
+PubMed     & 医学、生物学         & 免费，esearch + efetch 两步；提供摘要 \\
+DBLP       & 计算机科学           & 免费；不提供摘要（仅元数据） \\
+Europe PMC & 生命科学、生物医学   & 免费；提供摘要与引用数 \\
+OpenAlex   & 跨学科               & 免费，最大开放引用库；摘要由倒排索引还原 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{作为模块调用的代码示例}
+\begin{lstlisting}[language=Python]
+import asyncio
+from src.core import Coordinator, SharedWorkspace, RQManager
+from src.agents import SearchAgent, ScreenAgent, ClusterAgent, SummaryAgent
+
+async def main():
+    workspace = SharedWorkspace("./workspace")
+    rq_manager = RQManager("./workspace")
+
+    coordinator = Coordinator(workspace, rq_manager)
+    coordinator.register_agent(SearchAgent(workspace))
+    coordinator.register_agent(ScreenAgent(workspace, rq_manager))
+    coordinator.register_agent(ClusterAgent(workspace))
+    coordinator.register_agent(SummaryAgent(workspace))
+
+    result = await coordinator.run(
+        research_topic="deep learning for NLP",
+        auto_mode=True,        # 自动模式跳过人工审核
+    )
+    print(f"Report: {result.data}")
+
+asyncio.run(main())
+\end{lstlisting}
+
+\section{运行示例与产物}
+执行 \texttt{python main.py --topic "..." --full} 后，\texttt{workspace/} 目录下产出：
+\begin{itemize}[leftmargin=2.2em,itemsep=0.05em]
+  \item \texttt{research.db}：SQLite 文献库、嵌入、聚类、摘要（按主题隔离）；
+  \item \texttt{reports/literature\_review\_<时间戳>.md}：LLM 生成的两段式综述；
+  \item \texttt{reports/literature\_review\_<时间戳>\_fallback.md}：模板备用报告；
+  \item \texttt{checkpoints/init\_<时间戳>/}：阶段检查点快照；
+  \item \texttt{rq\_tree.json}：层级研究问题树。
+\end{itemize}
+
+\section{测试清单}
+\begin{center}\footnotesize
+\begin{tabularx}{\linewidth}{lYl}
+\toprule
+\textbf{测试文件} & \textbf{覆盖范围} & \textbf{状态} \\
+\midrule
+test\_workspace.py    & LiteratureRecord、工作区 CRUD、聚类/摘要/嵌入存取、检查点 & 全通过 \\
+test\_rq\_manager.py  & RQ 创建、层级查询、保存/加载、报告导出 & 全通过 \\
+test\_agents.py       & 各 Agent 初始化、输入校验、降维 & 全通过 \\
+test\_integration.py  & 默认查询、聚类工作流、RQ 树、持久化、检查点恢复 & 全通过 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+共 38 项测试在 Python 3.10.20 + 完整依赖环境下全部通过（\texttt{pytest -q}）。
+
+\section{技术栈与依赖概览}
+\begin{center}\footnotesize
+\begin{tabularx}{\linewidth}{lY}
+\toprule
+\textbf{类别} & \textbf{组件} \\
+\midrule
+语言/运行时   & Python 3.10+ \\
+LLM 框架     & langchain、langchain-openai、langchain-core、langchain-text-splitters \\
+异步/网络     & asyncio、aiohttp、aiofiles \\
+嵌入/ML       & sentence-transformers、scikit-learn、numpy、torch（CUDA 可选） \\
+聚类          & hdbscan \\
+持久化        & sqlite3（标准库）、pyyaml、python-dotenv \\
+Web           & gradio、pandas \\
+开发/测试     & pytest、pytest-asyncio、pytest-cov \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{运行环境}
+\begin{itemize}[leftmargin=2.2em,itemsep=0.05em]
+  \item 操作系统：Windows 11（亦支持 Linux/macOS）
+  \item Python：3.10+（开发与验证使用 3.10.20）
+  \item 可选 GPU：CUDA（加速嵌入推理与 PCA 降维）
+  \item 排版：本报告以 XeLaTeX (TeX Live 2025) + ctex 编译
+\end{itemize}
+
+\end{document}

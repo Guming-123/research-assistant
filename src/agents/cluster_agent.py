@@ -105,6 +105,10 @@ class ClusterAgent(BaseAgent):
         )
         super().__init__(config, workspace, llm_client)
 
+        # 簇标签生成使用 glm-4-flash，不受 glm-5 的 Coding 端点并发上限约束，
+        # 与 ScreenAgent 一致恢复并发 15，加速并行打标。
+        self.llm_semaphore = asyncio.Semaphore(15)
+
         # 聚类参数（来自论文Table 7）
         self.default_params = {
             "dimensionality_reduction": {
@@ -163,14 +167,16 @@ class ClusterAgent(BaseAgent):
                     errors=["No relevant papers in workspace"]
                 )
 
-            # 自适应 min_cluster_size：确保能形成簇
+            # 自适应 min_cluster_size / min_samples：高维空间里样本少时 HDBSCAN
+            # 容易把所有点判为噪声（出现 0 簇）。论文少时必须调小这两个参数。
             n_papers = len(papers)
-            if min_cluster_size > n_papers // 3:
-                min_cluster_size = max(2, n_papers // 10)
-                self.log_progress(
-                    f"Adjusted min_cluster_size to {min_cluster_size} "
-                    f"(only {n_papers} papers available)"
-                )
+            if n_papers < 200:
+                min_cluster_size = max(3, min(min_cluster_size, n_papers // 15))
+            min_samples = max(2, min(3, min_cluster_size - 1))
+            self.log_progress(
+                f"Adaptive clustering params for {n_papers} papers: "
+                f"min_cluster_size={min_cluster_size}, min_samples={min_samples}"
+            )
 
             self.log_progress(f"Clustering {len(papers)} papers...")
 
@@ -217,24 +223,31 @@ class ClusterAgent(BaseAgent):
                     errors=[f"Not enough papers for clustering: {len(valid_papers)} < {min_cluster_size}"]
                 )
 
-            # ② 降维
-            self.log_progress("Performing dimensionality reduction...")
-            reduced_embeddings = await self._dimensionality_reduction(valid_embeddings)
+            # ② 降维：聚类空间(高维) 与 可视化空间(2D) 分离
+            #    关键改动：HDBSCAN 在高维(PCA→50)空间聚类，2D 仅用于散点图，
+            #    避免在 t-SNE 2D 投影上聚类导致退化为少数超大簇。
+            self.log_progress("Preparing clustering space (high-dim PCA)...")
+            cluster_space = await self._reduce_for_clustering(valid_embeddings)
+            self.log_progress("Preparing visualization space (2D)...")
+            viz_embeddings = await self._dimensionality_reduction(valid_embeddings)
 
-            # ③ 聚类
-            self.log_progress(f"Performing {method.upper()} clustering...")
+            # ③ 聚类（在高维空间进行，而非 2D）
+            self.log_progress(
+                f"Performing {method.upper()} clustering on {cluster_space.shape[1]}-dim space..."
+            )
             cluster_labels = await self._perform_clustering(
-                reduced_embeddings,
+                cluster_space,
                 method=method,
                 min_cluster_size=min_cluster_size,
+                min_samples=min_samples,
             )
 
-            # ④ 生成簇信息
+            # ④ 生成簇信息（reduced 坐标仅记录，传入 2D 可视化坐标）
             self.log_progress("Generating cluster information...")
             clusters = await self._generate_clusters(
                 valid_papers,
                 cluster_labels,
-                reduced_embeddings,
+                viz_embeddings,
             )
 
             # ⑤ 生成簇标签
@@ -249,11 +262,11 @@ class ClusterAgent(BaseAgent):
             # 保存聚类结果
             await self.workspace.save_clusters(labeled_clusters)
 
-            # ⑥ 聚类质量评估
+            # ⑥ 聚类质量评估（轮廓系数等在「聚类空间」高维上计算更有意义）
             metrics = await self._evaluate_clustering(
-                valid_embeddings,
+                cluster_space,
                 cluster_labels,
-                reduced_embeddings,
+                cluster_space,
             )
 
             self.log_progress(
@@ -261,12 +274,12 @@ class ClusterAgent(BaseAgent):
                 f"{metrics.get('noise', 0)} noise points"
             )
 
-            # 保存可视化数据（将被过滤掉的簇标记为噪声 -1）
+            # 保存可视化数据（将被过滤掉的簇标记为噪声 -1）；坐标用 2D 可视化空间
             filtered_ids = {c.cluster_id for c in labeled_clusters}
             viz_labels = np.where(np.isin(cluster_labels, list(filtered_ids)), cluster_labels, -1)
             await self._save_visualization_data(
                 valid_papers,
-                reduced_embeddings,
+                viz_embeddings,
                 viz_labels,
             )
 
@@ -286,56 +299,72 @@ class ClusterAgent(BaseAgent):
             self.log_progress(error_msg, "error")
             return self._create_result(success=False, errors=[error_msg])
 
-    async def _dimensionality_reduction(
-        self,
-        embeddings: List[List[float]],
-    ) -> np.ndarray:
-        """
-        降维（PCA 优先 GPU，t-SNE 使用 CPU）
+    def _pca_reduce(self, arr: np.ndarray, n_components: int) -> np.ndarray:
+        """PCA 降维（GPU 优先，CPU 回退）"""
+        if _GPU_BACKEND == "torch-cuda":
+            return _gpu_pca(arr, n_components)
+        from sklearn.decomposition import PCA
+        return PCA(n_components=n_components, random_state=42).fit_transform(arr)
 
-        Args:
-            embeddings: 原始embeddings
-
-        Returns:
-            降维后的数组
-        """
-        arr = np.array(embeddings, dtype=np.float32)
-        n_samples = len(arr)
-
-        self.log_progress(f"Starting dimensionality reduction for {n_samples} papers ({_GPU_BACKEND})...")
-
-        # 论文太少时直接用 PCA，跳过 t-SNE（样本不足会导致 t-SNE 失败）
-        if n_samples < 10:
-            self.log_progress(f"Too few samples ({n_samples}) for t-SNE, using PCA directly...")
-            if _GPU_BACKEND == "torch-cuda":
-                return _gpu_pca(arr, 2)
-            else:
-                from sklearn.decomposition import PCA
-                return PCA(n_components=2, random_state=42).fit_transform(arr)
-
-        # 第一步：高维 → 50维（PCA，优先 GPU）
-        if arr.shape[1] > 50:
-            if _GPU_BACKEND == "torch-cuda":
-                self.log_progress(f"PCA {arr.shape[1]}→50 (GPU/PyTorch)...")
-                arr = _gpu_pca(arr, 50)
-            else:
-                from sklearn.decomposition import PCA
-                self.log_progress(f"PCA {arr.shape[1]}→50 (CPU/sklearn)...")
-                arr = PCA(n_components=50, random_state=42).fit_transform(arr)
-
-        # 第二步：50维 → 2维（统一使用 t-SNE）
+    def _tsne_to_2d(self, arr: np.ndarray) -> np.ndarray:
+        """t-SNE → 2D（仅用于可视化，不用于聚类）"""
         from sklearn.manifold import TSNE
-        self.log_progress(f"t-SNE 50→2 ({n_samples} samples)...")
+        n_samples = len(arr)
         tsne = TSNE(
             n_components=2,
             perplexity=min(30, max(5, n_samples // 10)),
             random_state=42,
             max_iter=500,
         )
-        reduced = tsne.fit_transform(arr)
+        return tsne.fit_transform(arr)
 
+    async def _reduce_for_clustering(
+        self,
+        embeddings: List[List[float]],
+    ) -> np.ndarray:
+        """
+        生成「聚类空间」：高维 → 自适应目标维度的 PCA。
+
+        聚类维度随样本量自适应（10–50 维）：样本少时降到更低维，
+        缓解维度灾难导致 HDBSCAN 把所有点判为噪声（0 簇）。
+        HDBSCAN 在此空间聚类，2D 仅用于可视化。
+        """
+        arr = np.array(embeddings, dtype=np.float32)
+        n = len(arr)
+        target = max(10, min(50, n // 5))  # 50篇→10维, 200篇→40维, 250+篇→50维
+        if arr.shape[1] <= target:
+            self.log_progress(f"Clustering space: keep {arr.shape[1]}-dim (<= {target})")
+            return arr
+        self.log_progress(f"PCA {arr.shape[1]}→{target} for clustering ({_GPU_BACKEND}, n={n})...")
+        return self._pca_reduce(arr, target)
+
+    async def _dimensionality_reduction(
+        self,
+        embeddings: List[List[float]],
+    ) -> np.ndarray:
+        """
+        生成「可视化空间」：→ 2D（t-SNE，样本过少时 PCA）。
+
+        仅用于散点图与可视化，不参与聚类决策。
+        """
+        arr = np.array(embeddings, dtype=np.float32)
+        n_samples = len(arr)
+
+        self.log_progress(f"Preparing 2D visualization for {n_samples} papers ({_GPU_BACKEND})...")
+
+        # 论文太少时直接用 PCA，跳过 t-SNE（样本不足会导致 t-SNE 失败）
+        if n_samples < 10:
+            self.log_progress(f"Too few samples ({n_samples}) for t-SNE, using PCA directly...")
+            return self._pca_reduce(arr, 2)
+
+        # 第一步：高维 → 50维（PCA，优先 GPU）
+        if arr.shape[1] > 50:
+            arr = self._pca_reduce(arr, 50)
+
+        # 第二步：50维 → 2维（t-SNE，仅可视化）
+        reduced = self._tsne_to_2d(arr)
         reduced = np.array(reduced, dtype=np.float64)
-        self.log_progress(f"Dimensionality reduction complete: {reduced.shape[1]} dimensions ({_GPU_BACKEND})")
+        self.log_progress(f"2D visualization ready ({_GPU_BACKEND})")
         return reduced
 
     async def _perform_clustering(
@@ -343,6 +372,7 @@ class ClusterAgent(BaseAgent):
         embeddings: np.ndarray,
         method: str = "hdbscan",
         min_cluster_size: int = 5,
+        min_samples: int = 3,
     ) -> np.ndarray:
         """
         执行聚类（hdbscan CPU，HDBSCAN 无 GPU 替代方案）
@@ -351,6 +381,7 @@ class ClusterAgent(BaseAgent):
             embeddings: 降维后的embeddings
             method: 聚类方法
             min_cluster_size: 最小簇大小
+            min_samples: HDBSCAN min_samples（核心点邻域样本数）
 
         Returns:
             聚类标签数组
@@ -363,7 +394,7 @@ class ClusterAgent(BaseAgent):
             self.log_progress("Using hdbscan (CPU)...")
             clusterer = hdbscan.HDBSCAN(
                 min_cluster_size=min_cluster_size,
-                min_samples=3,
+                min_samples=min_samples,
                 metric='euclidean',
                 cluster_selection_method='eom',
             )

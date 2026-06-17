@@ -46,20 +46,20 @@
 
 **Screen Agent** — 相关性筛选
 - 论文级余弦相似度：将所有论文和RQ问题分别嵌入，计算相似度矩阵
-- 三级筛选策略：高分自动通过、低分自动拒绝、边界区间送LLM判定
-- 全局LLM信号量(5并发)控制速率
+- 三级筛选策略：高分(≥0.71)自动通过、低分(<0.64)自动拒绝、边界区间[0.64,0.71)前50篇送LLM判定（第51+排除）
+- 按阶段并发：Screen/Cluster(glm-4-flash)=15，Search/Summary(glm-5)=3（贴合 GLM Coding 端点限制）
 
 **Cluster Agent** — 语义聚类
 - 仅对通过筛选的相关论文进行聚类
-- PCA降维（GPU加速）→ t-SNE/PCA到2D → HDBSCAN聚类
-- 自适应min_cluster_size：论文少时自动调小
-- LLM自动生成簇标签、描述和底层原理共同点
+- 高维聚类：在 PCA 自适应降维（10–50维，随样本量）的空间上直接跑 HDBSCAN；t-SNE 2D 仅用于可视化（避免在 2D 投影上聚类导致退化为少数大簇或全判噪声）
+- 自适应 min_cluster_size / min_samples：样本少时自动调小，避免 HDBSCAN 把所有点判为噪声（0簇）
+- LLM(glm-4-flash)并行生成簇标签、描述和底层原理共同点
 
 **Summary Agent** — 综述生成
 - 按簇提取论文内容（含作者、标题、年份、摘要）
 - 并行生成各簇的方法论分析（公式+推导）和应用分析
-- 两段式LLM生成完整报告（引言+方法论 / 应用+趋势+结论）
-- 始终保存fallback报告，LLM失败时自动降级
+- 两段式 LLM(glm-5) 生成完整报告：Stage1 引言+核心技术原理 / Stage2 技术性能+代际演进+根因分析+结论（max_tokens=32768）
+- 始终保存 fallback 报告，LLM 失败时自动降级
 - 强制引用格式 `[作者, 年份, 论文标题]`，禁止虚构论文
 
 ## 安装
@@ -103,7 +103,7 @@ cp .env.example .env
 ```bash
 # 智谱AI GLM（默认）
 OPENAI_API_KEY=your_glm_api_key
-OPENAI_BASE_URL=https://open.bigmodel.cn/api/paas/v4/
+OPENAI_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
 
 # 或 OpenAI
 # OPENAI_API_KEY=your_openai_api_key
@@ -116,7 +116,7 @@ OPENAI_BASE_URL=https://open.bigmodel.cn/api/paas/v4/
 
 ```bash
 # .env 中配置（默认值）
-EMBEDDING_MODEL=local-zh          # BGE-small-zh-v1.5, 中文优化, 768维
+EMBEDDING_MODEL=local-zh          # BGE-small-zh-v1.5, 中文优化, 512维
 # EMBEDDING_MODEL=local           # 多语言, ~470MB
 # EMBEDDING_MODEL=local-en        # 英文优化, ~90MB
 # EMBEDDING_MODEL=embedding-3     # 远程GLM API, 1024维, 按调用收费
@@ -129,15 +129,22 @@ EMBEDDING_MODEL=local-zh          # BGE-small-zh-v1.5, 中文优化, 768维
 编辑 `config.yaml` 调整各阶段参数：
 
 ```yaml
-# 核心参数说明
-llm:
-  default_max_tokens: 8000    # LLM最大输出token
+# 各阶段模型分工（高频阶段用 glm-4-flash，深度阶段用 glm-5）
+agents:
+  search:   { model: "glm-5" }            # 查询生成
+  screen:   { model: "glm-4-flash" }      # 边界筛选（高频）
+  cluster:  { model: "glm-4-flash" }      # 簇标签生成（高频）
+  summary:  { model: "glm-5", max_tokens: 32768 }   # 综述（长输出）
 
-screening:
-  nf_threshold: 0.68           # 筛选相似度阈值
+# 筛选三级阈值
+agents.screen:
+  default_nf_threshold: 0.64       # NF 过滤门槛
+  auto_approve_threshold: 0.71     # >= 此值自动通过
+  auto_reject_threshold: 0.64      # < 此值排除；[0.64,0.71) 前50篇送LLM
 
-clustering:
-  min_cluster_size: 20         # HDBSCAN最小簇大小
+# 聚类
+agents.cluster:
+  min_cluster_size: 6              # 自适应：样本少时自动调小
 ```
 
 ## 使用方法
@@ -226,9 +233,9 @@ research_assistant/
 │   ├── config/
 │   │   └── __init__.py            # 配置加载器 (YAML + 环境变量)
 │   ├── core/
-│   │   ├── agent.py               # BaseAgent基类 (LLM信号量控制)
+│   │   ├── agent.py               # BaseAgent基类 (按阶段LLM信号量)
 │   │   ├── coordinator.py         # 协调者 (流水线编排 + 质量门控)
-│   │   ├── workspace.py           # 共享工作区 (JSON持久化)
+│   │   ├── workspace.py           # SQLite 共享工作区 (多主题隔离)
 │   │   └── rq_manager.py          # 研究问题层级管理
 │   ├── agents/
 │   │   ├── search_agent.py        # 多源检索 + 去重
@@ -249,10 +256,10 @@ research_assistant/
 │       └── views.py               # 数据格式化与可视化
 ├── tests/                         # 测试套件
 └── workspace/                     # 运行时数据（自动创建）
-    ├── literature/records.json    # 论文数据库
-    ├── clusters/results.json      # 聚类结果
-    ├── embeddings/embeddings.json # 向量缓存
-    └── reports/                   # 生成的综述报告 (.md)
+    ├── research.db                # SQLite：文献/嵌入(全局共享) + 聚类/摘要(按主题隔离)
+    ├── rq_tree.json               # 当前研究问题(RQ)树
+    ├── reports/                   # 生成的综述报告 (.md)
+    └── checkpoints/               # 检查点快照（research.db 副本）
 ```
 
 ## 支持的学术数据库
@@ -272,14 +279,14 @@ research_assistant/
 | 组件 | 技术 |
 |------|------|
 | LLM框架 | LangChain + OpenAI兼容接口 |
-| 默认LLM | 智谱AI GLM-4-flash/plus |
-| 文本嵌入 | BGE-small-zh-v1.5 (本地GPU推理) |
-| 降维 | PCA (PyTorch CUDA) |
-| 聚类 | HDBSCAN |
-| 向量索引 | FAISS (GPU > CPU > NumPy回退) |
+| LLM | glm-5（Search/Summary）+ glm-4-flash（Screen/Cluster），走 GLM Coding 端点 |
+| 文本嵌入 | BGE-small-zh-v1.5 (本地GPU推理, 512维) |
+| 降维/聚类 | PCA(PyTorch CUDA)自适应降维 + HDBSCAN（高维空间聚类） |
+| 持久化 | SQLite (WAL, 多主题隔离, 检查点/回滚) |
+| 向量索引 | FAISS（可选；未安装时自动 NumPy 回退） |
 | Web UI | Gradio |
 | 异步框架 | asyncio + aiohttp |
-| 并发控制 | asyncio.Semaphore(5) |
+| 并发控制 | 按阶段信号量：glm-4-flash 阶段=15，glm-5 阶段=3 |
 
 ## 报告质量保障
 

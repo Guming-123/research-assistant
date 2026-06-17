@@ -15,7 +15,7 @@ workspace:
 
 # LLM配置
 llm:
-  default_model: "glm-4-flash"
+  default_model: "glm-5"
   default_temperature: 0.7
   default_max_tokens: 8000
   enable_streaming: false
@@ -31,30 +31,30 @@ embedding:
 # Agent配置
 agents:
   coordinator:
-    model: "glm-4-flash"
+    model: "glm-5"
     temperature: 0.3
 
   search:
-    model: "glm-4-flash"
+    model: "glm-5"
     temperature: 0.3
     default_databases: ["arxiv", "pubmed", "openalex", "dblp"]
     enable_pdf_download: false
     max_concurrent_requests: 5
 
   screen:
-    model: "glm-4-flash"
+    model: "glm-4-flash"   # 筛选阶段用 glm-4-flash（快速/低成本；Coding端点可用）
     temperature: 0.3
     chunk_size: 512
     chunk_overlap: 50
-    default_nf_threshold: 0.68
+    default_nf_threshold: 0.64
     enable_llm_screening: true
     # 三级筛选阈值
-    auto_approve_threshold: 0.75   # >= 此值自动通过，不调用LLM
-    auto_reject_threshold: 0.68    # < 此值自动拒绝
-    # 边界区间 [0.68, 0.75) 送LLM判定，最多150篇
+    auto_approve_threshold: 0.71   # >= 此值自动通过，不调用LLM
+    auto_reject_threshold: 0.64    # < 此值自动拒绝
+    # 边界区间 [0.64, 0.71) 送LLM判定，最多50篇
 
   cluster:
-    model: "glm-4-flash"
+    model: "glm-4-flash"   # 簇标签生成用 glm-4-flash（快速/低成本；Coding端点可用）
     temperature: 0.5
     method: "hdbscan"
     min_cluster_size: 6            # 论文 Table 7
@@ -63,9 +63,9 @@ agents:
     n_components: 2
 
   summary:
-    model: "glm-4-flash"
+    model: "glm-5"
     temperature: 0.5
-    max_tokens: 16384
+    max_tokens: 32768
     max_papers_per_cluster: 10
     include_methodology: true
     include_applications: true
@@ -98,7 +98,7 @@ quality_gates:
 search:
   default_year_start: 2018
   default_year_end: 2025
-  default_max_results: 1000
+  default_max_results: 200
   rate_limit_per_second: 10
 
 # 报告配置

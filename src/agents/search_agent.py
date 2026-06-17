@@ -305,8 +305,11 @@ class SearchAgent(BaseAgent):
                             async with ArxivAPI(session=shared_session) as api:
                                 papers = await api.search_papers(query=q, max_results=results_per_query)
                                 if not papers:
-                                    arxiv_rate_limited = True
-                                    self.log_progress(f"  ⚠ arXiv returned 0 papers, skipping remaining", "warning")
+                                    # 仅这一条查询无结果，不代表被限流；不要永久熔断后续查询
+                                    self.log_progress(
+                                        f"  ⚠ arXiv returned 0 papers for this query (continuing with later queries)",
+                                        "warning",
+                                    )
                                 else:
                                     self.log_progress(f"  ✓ arXiv: {len(papers)} papers")
                                 return papers

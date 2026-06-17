@@ -68,9 +68,11 @@ class TestSharedWorkspace:
         assert ws.base_path == Path(temp_workspace)
         assert ws.get_literature_count() == 0
 
-        # 检查目录是否创建
-        assert (Path(temp_workspace) / "literature").exists()
-        assert (Path(temp_workspace) / "clusters").exists()
+        # SQLite 模式下创建的目录与数据库文件
+        assert (Path(temp_workspace) / "reports").exists()
+        assert (Path(temp_workspace) / "checkpoints").exists()
+        assert (Path(temp_workspace) / "pdfs").exists()
+        assert (Path(temp_workspace) / "research.db").exists()
 
     @pytest.mark.asyncio
     async def test_add_literature(self, workspace, sample_paper):
@@ -210,13 +212,26 @@ class TestSharedWorkspace:
         assert summary == "This is a test summary"
 
     @pytest.mark.asyncio
-    async def test_save_and_get_embeddings(self, workspace):
+    async def test_save_and_get_embeddings(self, workspace, sample_paper):
         """测试保存和获取embeddings"""
+        # embeddings 表通过外键引用 literature(id)，须先入库对应论文
+        record = LiteratureRecord(
+            id="paper1",
+            title=sample_paper["title"],
+            authors=[a["name"] for a in sample_paper["authors"]],
+            abstract=sample_paper["abstract"],
+            year=sample_paper["year"],
+            source=sample_paper["source"],
+            url=sample_paper["url"],
+        )
+        await workspace.add_literature(record)
+
         embedding = [0.1, 0.2, 0.3] * 100  # 300维向量
         await workspace.save_embedding("paper1", embedding)
 
         retrieved = await workspace.get_embedding("paper1")
-        assert retrieved == embedding
+        # embedding 以 float32 落盘再读回，存在精度损失，需近似比较
+        assert retrieved == pytest.approx(embedding, rel=1e-5)
 
     @pytest.mark.asyncio
     async def test_checkpoint(self, workspace, sample_papers):
@@ -241,10 +256,10 @@ class TestSharedWorkspace:
         assert checkpoint_path is not None
         assert "test_checkpoint" in checkpoint_path
 
-        # 检查检查点目录
+        # 检查检查点目录（SQLite 模式下检查点保存 research.db 快照）
         checkpoint_dir = Path(checkpoint_path)
         assert checkpoint_dir.exists()
-        assert (checkpoint_dir / "literature").exists()
+        assert (checkpoint_dir / "research.db").exists()
 
     @pytest.mark.asyncio
     async def test_workspace_info(self, workspace):

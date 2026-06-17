@@ -12,6 +12,7 @@ Extended Academic Database APIs
 
 import asyncio
 import aiohttp
+import hashlib
 from typing import Any, Dict, List, Optional
 import logging
 from datetime import datetime
@@ -306,15 +307,20 @@ class DBLPAPI:
 
                 # URL
                 url = entry.get("url", "")
-                if not url:
-                    # 从 key 构造 URL
-                    key = entry.get("key", "")
-                    if key:
-                        url = f"https://dblp.org/rec/{key.replace('/', '.html')}"
+                # DBLP 记录 key（稳定、可复现），用作去重主键
+                key = entry.get("key", "")
+                if not url and key:
+                    url = f"https://dblp.org/rec/{key.replace('/', '.html')}"
+
+                # 稳定 ID：优先用 DBLP key，否则用标题的 md5（内建 hash 跨进程不可复现）
+                if key:
+                    dblp_id = f"dblp_{key}"
+                else:
+                    dblp_id = "dblp_" + hashlib.md5(title.lower().encode()).hexdigest()[:16]
 
                 paper = {
-                    "paperId": f"dblp_{hash(title)}",
-                    "id": f"dblp_{hash(title)}",
+                    "paperId": dblp_id,
+                    "id": dblp_id,
                     "title": title,
                     "abstract": "",  # DBLP 不提供摘要
                     "year": year,
@@ -460,9 +466,13 @@ class EuropePMCAPI:
                     except (ValueError, TypeError):
                         citation_count = 0
 
+                    # 稳定 ID：优先 Europe PMC 自带 id，否则用标题 md5
+                    eid = item.get("id") or hashlib.md5(title.lower().encode()).hexdigest()[:16]
+                    epmc_id = f"epmc_{eid}"
+
                     paper = {
-                        "paperId": f"epmc_{item.get('id', hash(title))}",
-                        "id": f"epmc_{item.get('id', hash(title))}",
+                        "paperId": epmc_id,
+                        "id": epmc_id,
                         "title": title,
                         "abstract": abstract,
                         "year": year,

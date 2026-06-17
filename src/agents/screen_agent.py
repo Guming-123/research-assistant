@@ -115,6 +115,10 @@ class ScreenAgent(BaseAgent):
         )
         super().__init__(config, workspace, llm_client)
 
+        # 筛选阶段使用 glm-4-flash（非 glm-5），不受 glm-5 的 Coding 端点并发上限约束，
+        # 恢复历史并发 15（原 _LLM_SEMAPHORE 旧值），加速边界论文批量判定。
+        self.llm_semaphore = asyncio.Semaphore(15)
+
         self.rq_manager = rq_manager
         self.faiss_index = None
         self._paper_chunks: Dict[str, List[Dict[str, Any]]] = {}  # 存储chunk信息
@@ -567,8 +571,9 @@ class ScreenAgent(BaseAgent):
         llm_min, llm_max = llm_threshold
 
         # 收集边界论文（按分数排序，限制数量）
+        # 仅边界区域相似度前 50 篇送 LLM 精筛；第 51+ 名排名靠后，判为不相关（排除）
         boundary_papers: List[Tuple[str, float]] = []
-        max_llm_calls = 150
+        max_llm_calls = 50
 
         for paper_id, nf_score in nf_results.items():
             # 高置信度：直接通过，不调用 LLM
@@ -607,14 +612,14 @@ class ScreenAgent(BaseAgent):
                 f"Boundary zone has {len(boundary_papers)} papers, "
                 f"sending top {max_llm_calls} to LLM"
             )
-            # 超出限额的边界论文直接拒绝
+            # 超出 top-N 的边界论文：排名靠后，判为不相关（排除，不送 LLM）
             for paper_id, nf_score in boundary_papers[max_llm_calls:]:
                 results.append(ScreeningResult(
                     paper_id=paper_id,
                     relevant=False,
                     confidence=nf_score,
                     relevance_scores={"similarity": nf_score},
-                    reasoning=f"Boundary overflow: {nf_score:.3f}",
+                    reasoning=f"Boundary overflow (beyond top-{max_llm_calls} LLM quota): {nf_score:.3f}",
                     normalized_frequency=nf_score,
                     related_rqs=[],
                 ))
@@ -636,12 +641,14 @@ class ScreenAgent(BaseAgent):
 
         # 统计
         auto_approved = sum(1 for r in results if r.relevant and "auto" in r.reasoning)
+        overflow_rejected = sum(1 for r in results if not r.relevant and "overflow" in r.reasoning)
         auto_rejected = sum(1 for r in results if not r.relevant and "auto" not in r.reasoning
                            and "overflow" not in r.reasoning)
         llm_screened = sum(1 for r in results if "auto" not in r.reasoning and "overflow" not in r.reasoning)
         self.log_progress(
-            f"Screening breakdown: {auto_approved} auto-approved, "
-            f"{llm_screened} LLM-screened, {auto_rejected} rejected"
+            f"Screening breakdown: {auto_approved} auto-approved (>=0.71), "
+            f"{llm_screened} LLM-screened, {overflow_rejected} boundary-overflow rejected, "
+            f"{auto_rejected} low-score rejected"
         )
 
         return results

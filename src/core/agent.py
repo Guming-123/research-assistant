@@ -21,7 +21,8 @@ from ..utils.llm import get_llm_client
 from ..utils.exceptions import LLMError, ValidationError
 
 # 全局 LLM 并发信号量（控制同时向 GLM API 发送的请求数）
-_LLM_SEMAPHORE = asyncio.Semaphore(15)
+# GLM Coding Plan 对 glm-5 的并发上限约 3（4 并发会触发 1305），故设为 3
+_LLM_SEMAPHORE = asyncio.Semaphore(3)
 logger = logging.getLogger(__name__)
 
 _CONFIG_CACHE: Optional[Dict[str, Any]] = None
@@ -39,7 +40,7 @@ def get_config() -> Dict[str, Any]:
     return _CONFIG_CACHE
 
 
-def get_agent_model(agent_name: str, default: str = "glm-4-flash") -> str:
+def get_agent_model(agent_name: str, default: str = "glm-5") -> str:
     """从 config.yaml 读取指定 agent 的模型名"""
     cfg = get_config()
     return cfg.get("agents", {}).get(agent_name, {}).get("model", default)
@@ -116,6 +117,8 @@ class BaseAgent(ABC):
         )
         self.logger = logging.getLogger(f"Agent.{config.name}")
         self._state: Dict[str, Any] = {}
+        # 默认使用全局信号量（glm-5 阶段：并发 3）；子类可按模型放宽/收紧
+        self.llm_semaphore = _LLM_SEMAPHORE
 
     @property
     def name(self) -> str:
@@ -180,7 +183,7 @@ class BaseAgent(ABC):
         max_retries = self.config.retry_attempts  # 默认 3
         base_delay = 2.0
 
-        async with _LLM_SEMAPHORE:
+        async with self.llm_semaphore:
             for attempt in range(max_retries + 1):
                 try:
                     if response_format:
